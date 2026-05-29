@@ -1,5 +1,5 @@
 {
-  "name": "voltorb-flip",
+  "name": "voltorb-flip-solver",
   "version": "1.0.0",
   "description": "Voltorb Flip puzzle solver — Pokémon Crystal GBA edition",
   "private": true,
