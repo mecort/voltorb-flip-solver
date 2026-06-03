@@ -14,10 +14,10 @@ voltorb-flip/
 │   └── workflows/
 │       └── deploy.yml      ← Auto-deploy on push to main
 ├── src/
-│   ├── App.jsx             ← GBA-style solver UI + engine
+│   ├── App.jsx             ← Solver UI + engine
 │   └── main.jsx            ← React entry point
 ├── index.html
-├── vite.config.js          ← Set base: '/your-repo-name/'
+├── vite.config.js          
 ├── package.json
 └── .gitignore
 ```
