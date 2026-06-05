@@ -38,20 +38,18 @@ async function loadImageToCanvas(file) {
 
 function classifyPixelColor(r, g, b) {
   // Returns: "red", "green", "orange", "blue", "purple", or null
-  // Tuned from actual Voltorb Flip screenshots across DS/emulator versions.
+  // Broadened ranges to handle various screenshot qualities, emulators, and photo lighting.
   //
-  // Red/Coral panel: R~200-240, G~80-130, B~60-110 (bright coral/salmon)
-  if (r > 180 && g > 55 && g < 145 && b > 35 && b < 125 && r > g + 55 && r > b + 55) return "red";
-  // Green panel: G~150-200, R~60-130, B~50-130 (bright green, NOT dark board green)
-  // Board green is ~(70-110, 140-170, 70-110) — panel green is brighter/more saturated
-  if (g > 145 && g < 215 && r > 45 && r < 135 && b > 45 && b < 135 && g > r + 25 && g > b + 25 && r > 50) return "green";
-  // Orange/Yellow panel: R~190-250, G~140-200, B~15-90 (warm orange/gold)
-  if (r > 175 && g > 125 && g < 205 && b > 5 && b < 100 && r > g && (r - b) > 95 && (g - b) > 50) return "orange";
-  // Blue panel: R~40-130, G~90-180, B~160-245 (medium-bright blue)
-  // Exclude the "Quit" button which is a very saturated blue with R<50
-  if (b > 155 && r > 35 && r < 140 && g > 85 && g < 185 && b > r + 45 && b > g) return "blue";
-  // Purple/Magenta panel: R~140-210, G~60-140, B~160-240 (clearly purple, not pink)
-  if (r > 135 && r < 215 && b > 155 && g > 55 && g < 145 && b > g + 35 && r > g + 15) return "purple";
+  // Red/Coral panel
+  if (r > 160 && g > 40 && g < 155 && b > 25 && b < 135 && r > g + 35 && r > b + 35) return "red";
+  // Green panel (NOT the dark board green — panels are brighter, more saturated)
+  if (g > 130 && r > 35 && r < 145 && b > 35 && b < 145 && g > r + 15 && g > b + 15) return "green";
+  // Orange/Yellow panel
+  if (r > 160 && g > 110 && g < 210 && b < 110 && r > g && (r - b) > 70) return "orange";
+  // Blue panel
+  if (b > 140 && r < 150 && g > 70 && g < 195 && b > r + 30) return "blue";
+  // Purple/Magenta panel
+  if (r > 120 && b > 140 && g > 40 && g < 155 && b > g + 20 && r > g + 10) return "purple";
   return null;
 }
 
@@ -274,76 +272,75 @@ function validatePanelsWithVoltorb(canvas, panels) {
  * - Col hints form a horizontal line (similar Y, varying X)
  */
 function classifyPanels(panels) {
-  if (panels.length < 6) return null;
+  if (panels.length < 2) return null;
 
   // All hint panels should be roughly the same size. Filter outliers.
-  const areas = panels.map(p => p.w * p.h);
-  const medianArea = areas.sort((a, b) => a - b)[Math.floor(areas.length / 2)];
+  const areas = panels.map(p => p.w * p.h).sort((a, b) => a - b);
+  const medianArea = areas[Math.floor(areas.length / 2)];
   
-  // Keep only panels within 3x of median area (rejects tiny noise and huge false positives)
+  // Keep only panels within 4x of median area
   const sizedPanels = panels.filter(p => {
     const a = p.w * p.h;
-    return a > medianArea * 0.3 && a < medianArea * 3.0;
+    return a > medianArea * 0.2 && a < medianArea * 4.0;
   });
 
-  if (sizedPanels.length < 6) return null;
+  if (sizedPanels.length < 2) return null;
 
   // Sort by size descending, take top candidates
   const candidates = [...sizedPanels]
     .sort((a, b) => (b.w * b.h) - (a.w * a.h))
     .slice(0, Math.min(14, sizedPanels.length));
 
-  // Strategy: Find 5 panels forming a vertical line (row hints = rightmost group)
-  // and 5 forming a horizontal line (col hints = bottommost group)
+  // Strategy: Find panels forming a vertical line (row hints = rightmost group)
+  // and panels forming a horizontal line (col hints = bottommost group)
   
   // Sort by X to find the rightmost vertical group
   const byX = [...candidates].sort((a, b) => b.cx - a.cx);
   
-  // Try to find 5 rightmost panels that are vertically aligned
+  // Try to find rightmost panels that are vertically aligned
   let rowPanels = null;
   for (let i = 0; i < Math.min(3, byX.length); i++) {
     const anchor = byX[i];
-    const tolerance = anchor.w * 2;
+    const tolerance = anchor.w * 2.5;
     const aligned = candidates
       .filter(p => Math.abs(p.cx - anchor.cx) < tolerance)
       .sort((a, b) => a.cy - b.cy);
-    if (aligned.length >= 5) {
+    if (aligned.length >= Math.min(3, candidates.length)) {
       rowPanels = aligned.slice(0, 5);
       break;
     }
   }
 
   if (!rowPanels) {
-    // Fallback: just take rightmost 5
-    rowPanels = byX.slice(0, 5).sort((a, b) => a.cy - b.cy);
+    // Fallback: take rightmost panels
+    rowPanels = byX.slice(0, Math.min(5, byX.length)).sort((a, b) => a.cy - b.cy);
   }
 
-  // Col panels: from remaining, find 5 that are horizontally aligned at bottom
+  // Col panels: from remaining, find horizontally aligned at bottom
   const remaining = candidates.filter(p => !rowPanels.includes(p));
   
   let colPanels = null;
-  const byY = [...remaining].sort((a, b) => b.cy - a.cy);
-  for (let i = 0; i < Math.min(3, byY.length); i++) {
-    const anchor = byY[i];
-    const tolerance = anchor.h * 2;
-    const aligned = remaining
-      .filter(p => Math.abs(p.cy - anchor.cy) < tolerance)
-      .sort((a, b) => a.cx - b.cx);
-    if (aligned.length >= 5) {
-      colPanels = aligned.slice(0, 5);
-      break;
+  if (remaining.length > 0) {
+    const byY = [...remaining].sort((a, b) => b.cy - a.cy);
+    for (let i = 0; i < Math.min(3, byY.length); i++) {
+      const anchor = byY[i];
+      const tolerance = anchor.h * 2.5;
+      const aligned = remaining
+        .filter(p => Math.abs(p.cy - anchor.cy) < tolerance)
+        .sort((a, b) => a.cx - b.cx);
+      if (aligned.length >= Math.min(3, remaining.length)) {
+        colPanels = aligned.slice(0, 5);
+        break;
+      }
     }
+    if (!colPanels) {
+      colPanels = byY.slice(0, Math.min(5, byY.length)).sort((a, b) => a.cx - b.cx);
+    }
+  } else {
+    colPanels = [];
   }
 
-  if (!colPanels) {
-    colPanels = byY.slice(0, 5).sort((a, b) => a.cx - b.cx);
-  }
-
-  if (rowPanels.length >= 5 && colPanels.length >= 5) {
-    return { rowPanels: rowPanels.slice(0, 5), colPanels: colPanels.slice(0, 5) };
-  }
-
-  return null;
+  return { rowPanels: rowPanels.slice(0, 5), colPanels: (colPanels || []).slice(0, 5) };
 }
 
 /* ─── Digit reading from detected panels ─── */
@@ -535,57 +532,54 @@ function processGameScreenshot(canvas) {
   // 1. Find all colored panels by their background color
   const panels = findColoredPanels(canvas);
 
-  if (panels.length < 6) {
-    throw new Error(`Found only ${panels.length} colored regions. Need at least 10. Try a clearer photo.`);
-  }
-
-  // 2. Validate with Voltorb icon detection — only keep panels that have the icon
+  // 2. Validate with Voltorb icon detection
   const validated = validatePanelsWithVoltorb(canvas, panels);
 
   // Use validated panels if we got enough, otherwise fall back to color-only
-  const usePanels = validated.length >= 8 ? validated : panels;
-
-  if (usePanels.length < 6) {
-    throw new Error(`Could not confirm enough hint panels (found ${validated.length} with Voltorb icons). Try again.`);
-  }
+  const usePanels = validated.length >= 6 ? validated : panels;
 
   // 3. Classify into row hints (right side) and column hints (bottom)
-  const classified = classifyPanels(usePanels);
-  if (!classified) {
-    throw new Error(`Could not identify row/column layout from ${usePanels.length} panels. Try again.`);
+  // Even if we don't have 10, try to classify what we have
+  let rowPanels = [];
+  let colPanels = [];
+
+  if (usePanels.length >= 3) {
+    const classified = classifyPanels(usePanels);
+    if (classified) {
+      rowPanels = classified.rowPanels;
+      colPanels = classified.colPanels;
+    } else {
+      // Can't classify — try heuristic: sort by position
+      // Rightmost panels = row hints, bottommost = col hints
+      const sorted = [...usePanels].sort((a, b) => b.cx - a.cx);
+      rowPanels = sorted.slice(0, Math.min(5, Math.ceil(sorted.length / 2))).sort((a, b) => a.cy - b.cy);
+      colPanels = sorted.slice(Math.min(5, Math.ceil(sorted.length / 2))).sort((a, b) => a.cx - b.cx);
+    }
   }
 
-  const { rowPanels, colPanels } = classified;
-
-  // 4. Read digits from each panel
-  // Use Voltorb icon position (if available) to better locate digit regions
+  // 4. Read digits from each panel (fill what we can)
   const readPanel = (panel) => {
     let ptsRegion, bombRegion;
 
     if (panel.voltorb && panel.voltorb.found) {
-      // Use voltorb position as anchor — digits are above it (pts) and to its right (bombs)
       const icon = panel.voltorb;
       const iconR = icon.radius * 1.2;
-
-      // Points: everything above the icon's top edge, full panel width
       ptsRegion = {
         x: panel.x + panel.w * 0.05,
         y: panel.y,
         w: panel.w * 0.9,
-        h: (icon.y - iconR) - panel.y,
+        h: Math.max(5, (icon.y - iconR) - panel.y),
       };
-      // Bombs: to the right of the icon center
       bombRegion = {
         x: icon.x + iconR * 0.5,
         y: icon.y - iconR,
-        w: (panel.x + panel.w) - (icon.x + iconR * 0.5) - panel.w * 0.05,
+        w: Math.max(5, (panel.x + panel.w) - (icon.x + iconR * 0.5) - panel.w * 0.05),
         h: iconR * 2.2,
       };
     } else {
-      // Fallback: use fixed proportions
       ptsRegion = {
         x: panel.x + panel.w * 0.1,
-        y: panel.y + panel.h * 0.0,
+        y: panel.y,
         w: panel.w * 0.8,
         h: panel.h * 0.45,
       };
@@ -597,10 +591,6 @@ function processGameScreenshot(canvas) {
       };
     }
 
-    // Ensure regions are valid
-    if (ptsRegion.h < 3) ptsRegion = { x: panel.x + panel.w * 0.1, y: panel.y, w: panel.w * 0.8, h: panel.h * 0.45 };
-    if (bombRegion.w < 3) bombRegion = { x: panel.x + panel.w * 0.45, y: panel.y + panel.h * 0.52, w: panel.w * 0.48, h: panel.h * 0.42 };
-
     const pts = readPoints(canvas, ptsRegion);
     const bombs = readBombs(canvas, bombRegion);
     return {
@@ -609,10 +599,22 @@ function processGameScreenshot(canvas) {
     };
   };
 
-  const rowResults = rowPanels.map(readPanel);
-  const colResults = colPanels.map(readPanel);
+  // Pad to 5 with empty values if we didn't find enough
+  const emptyHint = { pts: "", bombs: "" };
+  const rowResults = [
+    ...rowPanels.map(readPanel),
+    ...Array(Math.max(0, 5 - rowPanels.length)).fill(emptyHint),
+  ].slice(0, 5);
+  const colResults = [
+    ...colPanels.map(readPanel),
+    ...Array(Math.max(0, 5 - colPanels.length)).fill(emptyHint),
+  ].slice(0, 5);
 
-  return { rowResults, colResults, rowPanels, colPanels, allPanels: panels, validatedCount: validated.length };
+  return {
+    rowResults, colResults, rowPanels, colPanels,
+    allPanels: panels, validatedCount: validated.length,
+    totalFound: usePanels.length,
+  };
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -634,7 +636,7 @@ export default function PhotoCapture({ onHintsDetected }) {
 
     try {
       const canvas = await loadImageToCanvas(file);
-      const { rowResults, colResults, rowPanels, colPanels, allPanels, validatedCount } = processGameScreenshot(canvas);
+      const { rowResults, colResults, rowPanels, colPanels, allPanels, validatedCount, totalFound } = processGameScreenshot(canvas);
 
       // Generate debug overlay
       const dCanvas = document.createElement("canvas");
@@ -653,7 +655,6 @@ export default function PhotoCapture({ onHintsDetected }) {
       dCtx.lineWidth = Math.max(2, canvas.width * 0.003);
       rowPanels.forEach((p, i) => {
         dCtx.strokeRect(p.x, p.y, p.w, p.h);
-        // Draw voltorb icon center if found
         if (p.voltorb && p.voltorb.found) {
           dCtx.fillStyle = "#FF00FF";
           dCtx.beginPath();
@@ -676,15 +677,19 @@ export default function PhotoCapture({ onHintsDetected }) {
 
       setDebugImg(dCanvas.toDataURL("image/jpeg", 0.5));
 
-      const allEmpty = [...rowResults, ...colResults].every(r => r.pts === "" && r.bombs === "");
-      if (allEmpty) throw new Error("Panels found but no digits detected.");
+      const filledCount = [...rowResults, ...colResults].filter(r => r.pts !== "" || r.bombs !== "").length;
 
-      const rowStr = rowResults.map(r => `${r.pts}/${r.bombs}`).join(", ");
-      const colStr = colResults.map(r => `${r.pts}/${r.bombs}`).join(", ");
-      setDebugInfo(`R:[${rowStr}] C:[${colStr}] (${validatedCount}✓)`);
+      const rowStr = rowResults.map(r => `${r.pts || "?"}/${r.bombs || "?"}`).join(", ");
+      const colStr = colResults.map(r => `${r.pts || "?"}/${r.bombs || "?"}`).join(", ");
+      setDebugInfo(`R:[${rowStr}] C:[${colStr}] (${totalFound} found, ${validatedCount}✓)`);
 
-      setStatus("done");
-      onHintsDetected(rowResults, colResults);
+      if (filledCount === 0 && totalFound === 0) {
+        setErrorMsg("No panels detected. Make sure the game board is visible.");
+        setStatus("error");
+      } else {
+        setStatus("done");
+        onHintsDetected(rowResults, colResults);
+      }
     } catch (e) {
       console.error("Processing error:", e);
       setErrorMsg(e.message || "Failed to process image");
