@@ -1,21 +1,17 @@
 import { useState, useRef } from "react";
-import Tesseract from "tesseract.js";
 
 /* ═══════════════════════════════════════════════════════
-   PHOTO → HINTS PIPELINE
+   TEMPLATE-BASED DIGIT RECOGNITION
    
-   Approach:
-   1. Detect game board area by green background
-   2. Use fixed proportions (well-known from the game) to locate
-      the 5 row hint panels (right side) and 5 col hint panels (bottom)
-   3. For each panel, crop the top-half (points) and bottom-right (bombs)
-   4. Preprocess each crop aggressively for OCR
-   5. Run Tesseract with digit-only whitelist
+   The Voltorb Flip game uses a fixed bitmap font. Digits always
+   look the same. Instead of OCR, we:
+   1. Find the board via green-background detection
+   2. Locate hint panels using known layout proportions
+   3. Extract digit regions from each panel
+   4. Match extracted digits against pre-built templates
    
-   The key insight: the game layout is extremely consistent.
-   The grid is always 5x5, panels are always in the same relative positions.
-   Rather than trying to "find" panels dynamically (which is error-prone),
-   we detect the board edges and use known proportions.
+   Templates are encoded as binary pixel grids representing
+   each digit 0-9 in the game's font.
 ═══════════════════════════════════════════════════════ */
 
 async function loadImageToCanvas(file) {
@@ -35,10 +31,8 @@ async function loadImageToCanvas(file) {
   return canvas;
 }
 
-/**
- * Find the game board boundaries by detecting the green playing field.
- * Scans for rows/columns with high green pixel density.
- */
+/* ─── Board detection ─── */
+
 function findBoardBounds(canvas) {
   const ctx = canvas.getContext("2d");
   const w = canvas.width;
@@ -46,17 +40,12 @@ function findBoardBounds(canvas) {
   const imgData = ctx.getImageData(0, 0, w, h);
   const data = imgData.data;
 
-  function isGameGreen(r, g, b) {
-    // The game's green background: various shades of green
-    return g > 90 && g > r * 1.05 && g > b * 1.1 && r > 20 && r < 200 && b < 180;
-  }
-
-  // Find top/bottom/left/right extents of the green area
   let top = h, bottom = 0, left = w, right = 0;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
-      if (isGameGreen(data[i], data[i + 1], data[i + 2])) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      if (g > 90 && g > r * 1.05 && g > b * 1.1 && r > 20 && r < 200) {
         if (y < top) top = y;
         if (y > bottom) bottom = y;
         if (x < left) left = x;
@@ -66,214 +55,396 @@ function findBoardBounds(canvas) {
   }
 
   if (top >= bottom || left >= right) {
-    // Fallback: use entire image
     return { x: 0, y: 0, w, h };
   }
-
   return { x: left, y: top, w: right - left, h: bottom - top };
 }
 
-/**
- * Crop a region from canvas.
- */
-function crop(canvas, x, y, w, h) {
-  x = Math.max(0, Math.round(x));
-  y = Math.max(0, Math.round(y));
-  w = Math.max(1, Math.round(w));
-  h = Math.max(1, Math.round(h));
-  // Clamp to canvas bounds
-  if (x + w > canvas.width) w = canvas.width - x;
-  if (y + h > canvas.height) h = canvas.height - y;
-  const c = document.createElement("canvas");
-  c.width = w;
-  c.height = h;
-  const ctx = c.getContext("2d");
-  ctx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
-  return c;
-}
+/* ─── Panel location using known proportions ─── */
 
-/**
- * Preprocess a cropped hint region for OCR:
- * - Scale up 4x (pixel art needs upscaling for Tesseract)
- * - Convert to high-contrast black text on white background
- * - The text in these panels is dark/black on a colored bg
- */
-function preprocessForOCR(canvas) {
-  // Scale up first
-  const scale = 4;
-  const big = document.createElement("canvas");
-  big.width = canvas.width * scale;
-  big.height = canvas.height * scale;
-  const bigCtx = big.getContext("2d");
-  bigCtx.imageSmoothingEnabled = false; // preserve pixel art
-  bigCtx.drawImage(canvas, 0, 0, big.width, big.height);
-
-  // Now threshold: find dark pixels (the text)
-  const imgData = bigCtx.getImageData(0, 0, big.width, big.height);
-  const d = imgData.data;
-
-  // Sample background brightness from edges
-  let bgBrightness = 0, bgCount = 0;
-  for (let x = 0; x < big.width; x++) {
-    for (let y of [0, 1, big.height - 1, big.height - 2]) {
-      const i = (y * big.width + x) * 4;
-      bgBrightness += d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114;
-      bgCount++;
-    }
-  }
-  bgBrightness /= bgCount;
-
-  // Threshold: pixels significantly darker than background = text
-  const threshold = bgBrightness * 0.6;
-
-  for (let i = 0; i < d.length; i += 4) {
-    const brightness = d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114;
-    const isText = brightness < threshold;
-    d[i] = d[i+1] = d[i+2] = isText ? 0 : 255;
-  }
-
-  bigCtx.putImageData(imgData, 0, 0);
-
-  // Add white padding around the image (helps Tesseract)
-  const padded = document.createElement("canvas");
-  const pad = 20;
-  padded.width = big.width + pad * 2;
-  padded.height = big.height + pad * 2;
-  const pCtx = padded.getContext("2d");
-  pCtx.fillStyle = "white";
-  pCtx.fillRect(0, 0, padded.width, padded.height);
-  pCtx.drawImage(big, pad, pad);
-
-  return padded;
-}
-
-/**
- * Given the board bounds, calculate the regions for each hint panel.
- * 
- * From analyzing multiple Voltorb Flip screenshots, the layout proportions are:
- * 
- * The board (green area) contains:
- * - A 5x5 grid of cards starting near the top-left
- * - Row hint panels immediately to the right of the grid
- * - Column hint panels immediately below the grid
- * - Some padding/UI elements around
- * 
- * Typical proportions (relative to green area):
- * - Grid starts at roughly (3%, 4%) to (76%, 80%) of the green area
- * - Each cell is about 14.5% wide, 15% tall
- * - Row hints: x from 76% to 92%, same y as grid rows
- * - Col hints: y from 81% to 97%, same x as grid columns
- */
 function getHintRegions(board) {
   const { x: bx, y: by, w: bw, h: bh } = board;
 
-  // Grid spans from about 3% to 75% horizontally, 3% to 79% vertically
-  const gridL = bx + bw * 0.03;
-  const gridT = by + bh * 0.03;
-  const gridR = bx + bw * 0.745;
-  const gridB = by + bh * 0.79;
+  // Measured from actual Voltorb Flip screenshots:
+  // The board (green area) contains the 5x5 grid + hint panels.
+  // 
+  // Layout proportions (relative to green area bounds):
+  // Grid of cards: ~5% to ~67% horizontal, ~4% to ~81% vertical
+  // Row hint panels (right of grid): ~68% to ~84% horizontal
+  // Col hint panels (below grid): ~82% to ~98% vertical
+  //
+  // Each cell/panel occupies 1/5 of the grid span in its axis.
 
+  const gridL = bx + bw * 0.04;
+  const gridT = by + bh * 0.03;
+  const gridR = bx + bw * 0.67;
+  const gridB = by + bh * 0.81;
   const cellW = (gridR - gridL) / 5;
   const cellH = (gridB - gridT) / 5;
 
-  // Row hint panels: to the right of grid, same height as cells
-  // They span from about 76% to 92% of board width
-  const rhL = bx + bw * 0.755;
-  const rhR = bx + bw * 0.92;
-  const rhW = rhR - rhL;
-
-  const rowHints = [];
+  // Row hints (right side) — same vertical positions as grid rows
+  const rhL = bx + bw * 0.68;
+  const rhW = bw * 0.15;
+  const rowPanels = [];
   for (let r = 0; r < 5; r++) {
     const top = gridT + r * cellH;
-    rowHints.push({
-      // Points number: top portion of panel, centered
-      pts: { x: rhL + rhW * 0.15, y: top + cellH * 0.02, w: rhW * 0.7, h: cellH * 0.44 },
-      // Bomb count: bottom-right area (skip the voltorb icon on the left)
-      bombs: { x: rhL + rhW * 0.55, y: top + cellH * 0.50, w: rhW * 0.35, h: cellH * 0.44 },
-    });
+    rowPanels.push({ x: rhL, y: top, w: rhW, h: cellH });
   }
 
-  // Column hint panels: below the grid, same width as cells
-  // They span from about 80% to 97% of board height
-  const chT = by + bh * 0.80;
-  const chB = by + bh * 0.97;
-  const chH = chB - chT;
-
-  const colHints = [];
+  // Col hints (bottom) — same horizontal positions as grid columns
+  const chT = by + bh * 0.82;
+  const chH = bh * 0.16;
+  const colPanels = [];
   for (let c = 0; c < 5; c++) {
     const left = gridL + c * cellW;
-    colHints.push({
-      // Points number: top portion
-      pts: { x: left + cellW * 0.15, y: chT + chH * 0.02, w: cellW * 0.7, h: chH * 0.44 },
-      // Bomb count: bottom-right
-      bombs: { x: left + cellW * 0.50, y: chT + chH * 0.50, w: cellW * 0.4, h: chH * 0.44 },
-    });
+    colPanels.push({ x: left, y: chT, w: cellW, h: chH });
   }
 
-  return { rowHints, colHints };
+  return { rowPanels, colPanels };
+}
+
+/* ─── Digit extraction via column profiling ─── */
+
+/**
+ * Convert a canvas region to a binary "text" mask.
+ * Text is dark on a colored background.
+ * Returns { mask, w, h } where mask[y*w+x] = true if pixel is text.
+ */
+function regionToTextMask(canvas, region) {
+  const ctx = canvas.getContext("2d");
+  const { x, y, w, h } = region;
+  const rx = Math.max(0, Math.round(x));
+  const ry = Math.max(0, Math.round(y));
+  const rw = Math.min(Math.round(w), canvas.width - rx);
+  const rh = Math.min(Math.round(h), canvas.height - ry);
+  
+  if (rw <= 0 || rh <= 0) return { mask: [], w: 0, h: 0 };
+  
+  const imgData = ctx.getImageData(rx, ry, rw, rh);
+  const data = imgData.data;
+
+  // Sample background color from the border pixels (top & bottom rows)
+  let bgR = 0, bgG = 0, bgB = 0, bgCount = 0;
+  for (let sx = 0; sx < rw; sx++) {
+    for (const sy of [0, 1, rh - 1, rh - 2]) {
+      if (sy >= 0 && sy < rh) {
+        const i = (sy * rw + sx) * 4;
+        bgR += data[i]; bgG += data[i + 1]; bgB += data[i + 2];
+        bgCount++;
+      }
+    }
+  }
+  if (bgCount > 0) { bgR /= bgCount; bgG /= bgCount; bgB /= bgCount; }
+
+  const bgLum = bgR * 0.299 + bgG * 0.587 + bgB * 0.114;
+
+  // Create text mask: text pixels are significantly darker than background
+  const mask = new Uint8Array(rw * rh);
+  for (let py = 0; py < rh; py++) {
+    for (let px = 0; px < rw; px++) {
+      const i = (py * rw + px) * 4;
+      const lum = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      // Text is dark relative to the colored background
+      if (lum < bgLum * 0.55) {
+        mask[py * rw + px] = 1;
+      }
+    }
+  }
+
+  return { mask, w: rw, h: rh };
 }
 
 /**
- * Run OCR on a small cropped region and return the detected number.
+ * From a text mask, find individual digit bounding boxes using column profiling.
  */
-async function ocrNumber(canvas, region, worker) {
-  const cropped = crop(canvas, region.x, region.y, region.w, region.h);
-  const processed = preprocessForOCR(cropped);
+function findDigitBounds(mask, w, h) {
+  // Get column density
+  const colDens = new Array(w).fill(0);
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) {
+      if (mask[y * w + x]) colDens[x]++;
+    }
+  }
 
-  const { data } = await worker.recognize(processed);
-  const text = data.text.replace(/[^0-9]/g, "");
-  if (!text) return null;
-  const num = parseInt(text, 10);
-  return isNaN(num) ? null : num;
+  // Find runs of columns with text
+  const minDens = h * 0.05;
+  const runs = [];
+  let inRun = false, start = 0;
+  for (let x = 0; x <= w; x++) {
+    const d = x < w ? colDens[x] : 0;
+    if (d > minDens && !inRun) { inRun = true; start = x; }
+    else if (d <= minDens && inRun) {
+      inRun = false;
+      if (x - start > w * 0.04) runs.push({ x1: start, x2: x });
+    }
+  }
+
+  // For each run, find vertical bounds
+  return runs.map(({ x1, x2 }) => {
+    let top = h, bottom = 0;
+    for (let y = 0; y < h; y++) {
+      for (let x = x1; x < x2; x++) {
+        if (mask[y * w + x]) {
+          if (y < top) top = y;
+          if (y > bottom) bottom = y;
+        }
+      }
+    }
+    return { x: x1, y: top, w: x2 - x1, h: bottom - top + 1 };
+  }).filter(b => b.h > 2);
 }
 
 /**
- * Main processing function.
+ * Normalize a digit region to a fixed-size grid (7x10) for matching.
+ * Returns an array of 70 values (0 or 1).
  */
-async function processGameScreenshot(canvas, onProgress) {
-  onProgress(5);
+function normalizeDigit(mask, maskW, bounds) {
+  const gw = 7, gh = 10;
+  const grid = new Array(gw * gh).fill(0);
+  
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) {
+      // Map grid cell to source pixels
+      const srcX = Math.round(bounds.x + (gx / gw) * bounds.w);
+      const srcY = Math.round(bounds.y + (gy / gh) * bounds.h);
+      const srcX2 = Math.round(bounds.x + ((gx + 1) / gw) * bounds.w);
+      const srcY2 = Math.round(bounds.y + ((gy + 1) / gh) * bounds.h);
+      
+      // Count filled pixels in this cell
+      let filled = 0, total = 0;
+      for (let sy = srcY; sy < srcY2; sy++) {
+        for (let sx = srcX; sx < srcX2; sx++) {
+          if (sy >= 0 && sy < (bounds.y + bounds.h) && sx >= 0) {
+            total++;
+            if (mask[sy * maskW + sx]) filled++;
+          }
+        }
+      }
+      grid[gy * gw + gx] = total > 0 && filled / total > 0.3 ? 1 : 0;
+    }
+  }
+  return grid;
+}
 
-  // 1. Find the green board area
+/* ─── Digit templates (7x10 binary grids) ─── */
+// These represent what digits 0-9 look like in the standard bitmap font
+// used by Pokémon HGSS Voltorb Flip, normalized to a 7-wide x 10-tall grid.
+// 1 = filled, 0 = empty.
+
+const TEMPLATES = {
+  0: [
+    0,0,1,1,1,0,0,
+    0,1,1,0,1,1,0,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    0,1,1,0,1,1,0,
+    0,0,1,1,1,0,0,
+  ],
+  1: [
+    0,0,0,1,1,0,0,
+    0,0,1,1,1,0,0,
+    0,1,1,1,1,0,0,
+    0,0,0,1,1,0,0,
+    0,0,0,1,1,0,0,
+    0,0,0,1,1,0,0,
+    0,0,0,1,1,0,0,
+    0,0,0,1,1,0,0,
+    0,0,0,1,1,0,0,
+    0,1,1,1,1,1,0,
+  ],
+  2: [
+    0,1,1,1,1,1,0,
+    1,1,0,0,0,1,1,
+    0,0,0,0,0,1,1,
+    0,0,0,0,0,1,1,
+    0,0,0,0,1,1,0,
+    0,0,0,1,1,0,0,
+    0,0,1,1,0,0,0,
+    0,1,1,0,0,0,0,
+    1,1,0,0,0,0,0,
+    1,1,1,1,1,1,1,
+  ],
+  3: [
+    0,1,1,1,1,1,0,
+    1,1,0,0,0,1,1,
+    0,0,0,0,0,1,1,
+    0,0,0,0,0,1,1,
+    0,0,1,1,1,1,0,
+    0,0,0,0,0,1,1,
+    0,0,0,0,0,1,1,
+    0,0,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    0,1,1,1,1,1,0,
+  ],
+  4: [
+    0,0,0,0,1,1,0,
+    0,0,0,1,1,1,0,
+    0,0,1,1,1,1,0,
+    0,1,1,0,1,1,0,
+    1,1,0,0,1,1,0,
+    1,1,1,1,1,1,1,
+    0,0,0,0,1,1,0,
+    0,0,0,0,1,1,0,
+    0,0,0,0,1,1,0,
+    0,0,0,0,1,1,0,
+  ],
+  5: [
+    1,1,1,1,1,1,1,
+    1,1,0,0,0,0,0,
+    1,1,0,0,0,0,0,
+    1,1,1,1,1,1,0,
+    0,0,0,0,0,1,1,
+    0,0,0,0,0,1,1,
+    0,0,0,0,0,1,1,
+    0,0,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    0,1,1,1,1,1,0,
+  ],
+  6: [
+    0,0,1,1,1,1,0,
+    0,1,1,0,0,0,0,
+    1,1,0,0,0,0,0,
+    1,1,0,0,0,0,0,
+    1,1,1,1,1,1,0,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    0,1,1,0,0,1,1,
+    0,0,1,1,1,1,0,
+  ],
+  7: [
+    1,1,1,1,1,1,1,
+    0,0,0,0,0,1,1,
+    0,0,0,0,1,1,0,
+    0,0,0,0,1,1,0,
+    0,0,0,1,1,0,0,
+    0,0,0,1,1,0,0,
+    0,0,1,1,0,0,0,
+    0,0,1,1,0,0,0,
+    0,0,1,1,0,0,0,
+    0,0,1,1,0,0,0,
+  ],
+  8: [
+    0,1,1,1,1,1,0,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    0,1,1,1,1,1,0,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    0,1,1,1,1,1,0,
+  ],
+  9: [
+    0,1,1,1,1,1,0,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    1,1,0,0,0,1,1,
+    0,1,1,1,1,1,1,
+    0,0,0,0,0,1,1,
+    0,0,0,0,0,1,1,
+    0,0,0,0,0,1,1,
+    0,0,0,0,1,1,0,
+    0,1,1,1,1,0,0,
+  ],
+};
+
+/**
+ * Match a normalized digit grid against all templates.
+ * Returns the digit (0-9) with the best match.
+ */
+function matchDigit(grid) {
+  let bestDigit = 0;
+  let bestScore = -1;
+
+  for (let d = 0; d <= 9; d++) {
+    const tmpl = TEMPLATES[d];
+    let match = 0;
+    for (let i = 0; i < 70; i++) {
+      if (grid[i] === tmpl[i]) match++;
+    }
+    if (match > bestScore) {
+      bestScore = match;
+      bestDigit = d;
+    }
+  }
+
+  return bestDigit;
+}
+
+/**
+ * Read a number (1 or 2 digits) from a panel sub-region.
+ */
+function readNumber(canvas, region) {
+  const { mask, w, h } = regionToTextMask(canvas, region);
+  if (w === 0 || h === 0) return null;
+
+  const digitBounds = findDigitBounds(mask, w, h);
+  if (digitBounds.length === 0) return null;
+
+  let result = 0;
+  for (const bounds of digitBounds) {
+    const grid = normalizeDigit(mask, w, bounds);
+    const digit = matchDigit(grid);
+    result = result * 10 + digit;
+  }
+  return result;
+}
+
+/* ─── Main processing ─── */
+
+function processGameScreenshot(canvas) {
   const board = findBoardBounds(canvas);
-  onProgress(10);
+  const { rowPanels, colPanels } = getHintRegions(board);
 
-  // 2. Calculate hint panel positions
-  const { rowHints, colHints } = getHintRegions(board);
-  onProgress(15);
-
-  // 3. Initialize Tesseract
-  const worker = await Tesseract.createWorker("eng");
-  await worker.setParameters({
-    tessedit_char_whitelist: "0123456789",
-    tessedit_pageseg_mode: "7", // single text line
+  const rowResults = rowPanels.map((panel) => {
+    // Points: top half of panel
+    const ptsRegion = {
+      x: panel.x + panel.w * 0.1,
+      y: panel.y + panel.h * 0.0,
+      w: panel.w * 0.8,
+      h: panel.h * 0.48,
+    };
+    // Bombs: bottom-right of panel (skip voltorb icon on left)
+    const bombRegion = {
+      x: panel.x + panel.w * 0.5,
+      y: panel.y + panel.h * 0.52,
+      w: panel.w * 0.45,
+      h: panel.h * 0.44,
+    };
+    const pts = readNumber(canvas, ptsRegion);
+    const bombs = readNumber(canvas, bombRegion);
+    return {
+      pts: pts !== null ? String(pts) : "",
+      bombs: bombs !== null ? String(bombs) : "",
+    };
   });
-  onProgress(30);
 
-  // 4. OCR each region
-  const rowResults = [];
-  for (let r = 0; r < 5; r++) {
-    const pts = await ocrNumber(canvas, rowHints[r].pts, worker);
-    const bombs = await ocrNumber(canvas, rowHints[r].bombs, worker);
-    rowResults.push({
+  const colResults = colPanels.map((panel) => {
+    const ptsRegion = {
+      x: panel.x + panel.w * 0.1,
+      y: panel.y + panel.h * 0.0,
+      w: panel.w * 0.8,
+      h: panel.h * 0.48,
+    };
+    const bombRegion = {
+      x: panel.x + panel.w * 0.5,
+      y: panel.y + panel.h * 0.52,
+      w: panel.w * 0.45,
+      h: panel.h * 0.44,
+    };
+    const pts = readNumber(canvas, ptsRegion);
+    const bombs = readNumber(canvas, bombRegion);
+    return {
       pts: pts !== null ? String(pts) : "",
       bombs: bombs !== null ? String(bombs) : "",
-    });
-    onProgress(30 + Math.round(((r + 1) / 10) * 60));
-  }
-
-  const colResults = [];
-  for (let c = 0; c < 5; c++) {
-    const pts = await ocrNumber(canvas, colHints[c].pts, worker);
-    const bombs = await ocrNumber(canvas, colHints[c].bombs, worker);
-    colResults.push({
-      pts: pts !== null ? String(pts) : "",
-      bombs: bombs !== null ? String(bombs) : "",
-    });
-    onProgress(30 + Math.round(((5 + c + 1) / 10) * 60));
-  }
-
-  await worker.terminate();
-  onProgress(100);
+    };
+  });
 
   return { rowResults, colResults };
 }
@@ -283,19 +454,59 @@ async function processGameScreenshot(canvas, onProgress) {
 ═══════════════════════════════════════════════════════ */
 export default function PhotoCapture({ onHintsDetected }) {
   const [status, setStatus] = useState("idle");
-  const [progress, setProgress] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
+  const [debugInfo, setDebugInfo] = useState("");
+  const [debugImg, setDebugImg] = useState(null);
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
 
   const processImage = async (file) => {
     setStatus("processing");
-    setProgress(0);
     setErrorMsg("");
+    setDebugInfo("");
+    setDebugImg(null);
 
     try {
       const canvas = await loadImageToCanvas(file);
-      const { rowResults, colResults } = await processGameScreenshot(canvas, setProgress);
+      
+      // Generate debug overlay image
+      const debugCanvas = document.createElement("canvas");
+      debugCanvas.width = canvas.width;
+      debugCanvas.height = canvas.height;
+      const dCtx = debugCanvas.getContext("2d");
+      dCtx.drawImage(canvas, 0, 0);
+      
+      const board = findBoardBounds(canvas);
+      const { rowPanels, colPanels } = getHintRegions(board);
+      
+      // Draw debug rectangles
+      dCtx.strokeStyle = "#FF0000";
+      dCtx.lineWidth = 3;
+      dCtx.strokeRect(board.x, board.y, board.w, board.h); // Board bounds in red
+      
+      dCtx.strokeStyle = "#00FF00";
+      dCtx.lineWidth = 2;
+      rowPanels.forEach(p => dCtx.strokeRect(p.x, p.y, p.w, p.h));
+      
+      dCtx.strokeStyle = "#0088FF";
+      dCtx.lineWidth = 2;
+      colPanels.forEach(p => dCtx.strokeRect(p.x, p.y, p.w, p.h));
+      
+      setDebugImg(debugCanvas.toDataURL("image/jpeg", 0.6));
+
+      const { rowResults, colResults } = processGameScreenshot(canvas);
+      
+      const allEmpty = [...rowResults, ...colResults].every(
+        r => r.pts === "" && r.bombs === ""
+      );
+      if (allEmpty) {
+        throw new Error("No values detected. Make sure the full game board is visible.");
+      }
+
+      const rowStr = rowResults.map(r => `${r.pts}/${r.bombs}`).join(", ");
+      const colStr = colResults.map(r => `${r.pts}/${r.bombs}`).join(", ");
+      setDebugInfo(`R:[${rowStr}] C:[${colStr}]`);
+
       setStatus("done");
       onHintsDetected(rowResults, colResults);
     } catch (e) {
@@ -312,8 +523,9 @@ export default function PhotoCapture({ onHintsDetected }) {
 
   const reset = () => {
     setStatus("idle");
-    setProgress(0);
     setErrorMsg("");
+    setDebugInfo("");
+    setDebugImg(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (cameraInputRef.current) cameraInputRef.current.value = "";
   };
@@ -338,30 +550,30 @@ export default function PhotoCapture({ onHintsDetected }) {
 
       {status === "processing" && (
         <div style={{ textAlign: "center" }}>
-          <div style={{
-            fontFamily: "'Press Start 2P', monospace", fontSize: 7,
-            color: "#FFF", marginBottom: 4,
-          }}>SCANNING... {progress}%</div>
-          <div style={{
-            height: 8, background: "#1A5A3A",
-            border: "2px solid #0A3A2A", borderRadius: 4,
-            overflow: "hidden",
-          }}>
-            <div style={{
-              height: "100%", width: `${progress}%`,
-              background: "linear-gradient(90deg, #D8A838, #E8C848)",
-              transition: "width 0.2s", borderRadius: 2,
-            }} />
-          </div>
+          <span style={{ fontFamily: "'Press Start 2P', monospace", fontSize: 7, color: "#FFF" }}>
+            ANALYZING...
+          </span>
         </div>
       )}
 
       {status === "done" && (
         <div style={{ textAlign: "center" }}>
           <span style={{ fontFamily: "'Press Start 2P', monospace", fontSize: 7, color: "#AAFFAA" }}>
-            ✓ LOADED — VERIFY & SOLVE
+            ✓ VERIFY VALUES & SOLVE
           </span>
           <button onClick={reset} style={retryStyle}>RETRY</button>
+          {debugInfo && (
+            <div style={{
+              fontFamily: "monospace", fontSize: 9, color: "#AAFFAA88",
+              marginTop: 4, wordBreak: "break-all",
+            }}>{debugInfo}</div>
+          )}
+          {debugImg && (
+            <img src={debugImg} alt="debug" style={{
+              width: "100%", maxWidth: 300, marginTop: 6,
+              borderRadius: 4, border: "1px solid #FFF3",
+            }} />
+          )}
         </div>
       )}
 
@@ -371,6 +583,12 @@ export default function PhotoCapture({ onHintsDetected }) {
             ⚠ {errorMsg}
           </span>
           <button onClick={reset} style={retryStyle}>RETRY</button>
+          {debugImg && (
+            <img src={debugImg} alt="debug" style={{
+              width: "100%", maxWidth: 300, marginTop: 6,
+              borderRadius: 4, border: "1px solid #FFF3",
+            }} />
+          )}
         </div>
       )}
     </div>
