@@ -267,7 +267,7 @@ function GameBtn({ label, variant = "primary", onClick }) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   APP CONSTANTS & RANDOM BOARD GENERATOR
+   APP CONSTANTS & RANDOM DEMO GENERATOR
 ═══════════════════════════════════════════════════════ */
 const N = 5;
 const mkHints = () => Array.from({ length: N }, () => ({ pts: "", bombs: "" }));
@@ -519,7 +519,7 @@ export default function VoltorbGBA() {
         {/* ═══ BUTTONS ═══ */}
         <div style={{ display: "flex", gap: 8, marginTop: 10, justifyContent: "center", flexWrap: "wrap" }}>
           <GameBtn label="SOLVE" variant="primary" onClick={handleSolve} />
-          <GameBtn label="RANDOM" variant="secondary" onClick={loadDemo} />
+          <GameBtn label="DEMO" variant="secondary" onClick={loadDemo} />
           <GameBtn label="CLEAR" variant="danger" onClick={clearAll} />
         </div>
 
