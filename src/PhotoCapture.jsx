@@ -38,16 +38,20 @@ async function loadImageToCanvas(file) {
 
 function classifyPixelColor(r, g, b) {
   // Returns: "red", "green", "orange", "blue", "purple", or null
-  // Red/Coral panel: dominant red, moderate green, low blue
-  if (r > 170 && g > 50 && g < 140 && b > 30 && b < 120 && r > g && r > b && (r - g) > 40) return "red";
-  // Green panel: dominant green, low-moderate red and blue
-  if (g > 140 && r > 40 && r < 130 && b > 40 && b < 130 && g > r && g > b && (g - r) > 30) return "green";
-  // Orange/Yellow panel: high red, moderate-high green, low blue
-  if (r > 170 && g > 110 && g < 200 && b > 10 && b < 100 && r > b && g > b && (r - b) > 80) return "orange";
-  // Blue panel: dominant blue, low-moderate red, moderate green
-  if (b > 140 && r > 20 && r < 130 && g > 70 && g < 180 && b > r && (b - r) > 30) return "blue";
-  // Purple/Pink panel: high red, high blue, low green
-  if (r > 110 && b > 120 && g > 30 && g < 130 && r > g && b > g && (r + b) > (g * 2 + 100)) return "purple";
+  // Tuned from actual Voltorb Flip screenshots across DS/emulator versions.
+  //
+  // Red/Coral panel: R~200-240, G~80-130, B~60-110 (bright coral/salmon)
+  if (r > 180 && g > 55 && g < 145 && b > 35 && b < 125 && r > g + 55 && r > b + 55) return "red";
+  // Green panel: G~150-200, R~60-130, B~50-130 (bright green, NOT dark board green)
+  // Board green is ~(70-110, 140-170, 70-110) — panel green is brighter/more saturated
+  if (g > 145 && g < 215 && r > 45 && r < 135 && b > 45 && b < 135 && g > r + 25 && g > b + 25 && r > 50) return "green";
+  // Orange/Yellow panel: R~190-250, G~140-200, B~15-90 (warm orange/gold)
+  if (r > 175 && g > 125 && g < 205 && b > 5 && b < 100 && r > g && (r - b) > 95 && (g - b) > 50) return "orange";
+  // Blue panel: R~40-130, G~90-180, B~160-245 (medium-bright blue)
+  // Exclude the "Quit" button which is a very saturated blue with R<50
+  if (b > 155 && r > 35 && r < 140 && g > 85 && g < 185 && b > r + 45 && b > g) return "blue";
+  // Purple/Magenta panel: R~140-210, G~60-140, B~160-240 (clearly purple, not pink)
+  if (r > 135 && r < 215 && b > 155 && g > 55 && g < 145 && b > g + 35 && r > g + 15) return "purple";
   return null;
 }
 
@@ -106,14 +110,32 @@ function findColoredPanels(canvas) {
       const bh = maxY - minY;
 
       // Filter: panels should be roughly square-ish and decent size
-      const minDim = Math.min(w, h) * 0.03;
-      const maxDim = Math.min(w, h) * 0.25;
+      const minDim = Math.min(w, h) * 0.02; // Lowered to catch smaller panels in DS screenshots
+      const maxDim = Math.min(w, h) * 0.20;
       if (bw < minDim || bh < minDim) continue;
       if (bw > maxDim || bh > maxDim) continue;
 
-      // Aspect ratio: panels are roughly square (0.5-2.0 ratio)
+      // Aspect ratio: hint panels are roughly square (0.5-2.5)
       const aspect = bw / bh;
-      if (aspect < 0.3 || aspect > 3.0) continue;
+      if (aspect < 0.4 || aspect > 2.5) continue;
+
+      // Verify: panel should contain some dark pixels (text/icon)
+      // This filters out solid-colored UI elements like buttons
+      let darkPixels = 0;
+      const checkStep = Math.max(1, Math.floor(Math.min(bw, bh) / 10));
+      for (let cy = minY; cy <= maxY; cy += checkStep) {
+        for (let cx = minX; cx <= maxX; cx += checkStep) {
+          const idx = (cy * w + cx) * 4;
+          if (idx >= 0 && idx < data.length - 3) {
+            const lum = data[idx] * 0.3 + data[idx+1] * 0.6 + data[idx+2] * 0.1;
+            if (lum < 80) darkPixels++;
+          }
+        }
+      }
+      const totalChecked = Math.ceil((maxY - minY) / checkStep) * Math.ceil((maxX - minX) / checkStep) || 1;
+      const darkRatio = darkPixels / totalChecked;
+      // Hint panels should have 10-60% dark pixels (text + voltorb icon)
+      if (darkRatio < 0.05 || darkRatio > 0.7) continue;
 
       allPanels.push({
         color,
@@ -174,79 +196,75 @@ function clusterPoints(points, maxDist) {
  * - Col hints form a horizontal line (similar Y, varying X)
  */
 function classifyPanels(panels) {
-  if (panels.length < 6) return null; // Need at least 6 to have any chance
+  if (panels.length < 6) return null;
 
-  // Sort by size and take the largest ones (most likely to be hint panels)
-  const sorted = [...panels].sort((a, b) => (b.w * b.h) - (a.w * a.h));
-  const candidates = sorted.slice(0, Math.min(15, sorted.length));
+  // All hint panels should be roughly the same size. Filter outliers.
+  const areas = panels.map(p => p.w * p.h);
+  const medianArea = areas.sort((a, b) => a - b)[Math.floor(areas.length / 2)];
+  
+  // Keep only panels within 3x of median area (rejects tiny noise and huge false positives)
+  const sizedPanels = panels.filter(p => {
+    const a = p.w * p.h;
+    return a > medianArea * 0.3 && a < medianArea * 3.0;
+  });
 
-  if (candidates.length < 10) {
-    // Try with what we have
-    if (candidates.length < 6) return null;
-  }
+  if (sizedPanels.length < 6) return null;
 
-  // Try to find 5 panels that form a vertical line (row hints)
-  // and 5 that form a horizontal line (col hints)
-  // 
-  // Approach: find the rightmost cluster of ~5 panels (row hints)
-  // then the bottommost cluster of remaining panels (col hints)
+  // Sort by size descending, take top candidates
+  const candidates = [...sizedPanels]
+    .sort((a, b) => (b.w * b.h) - (a.w * a.h))
+    .slice(0, Math.min(14, sizedPanels.length));
 
-  // Sort by X to find rightmost group
+  // Strategy: Find 5 panels forming a vertical line (row hints = rightmost group)
+  // and 5 forming a horizontal line (col hints = bottommost group)
+  
+  // Sort by X to find the rightmost vertical group
   const byX = [...candidates].sort((a, b) => b.cx - a.cx);
   
-  // The row hints should be the 5 rightmost panels
-  // But we need to verify they form a vertical line
-  const rowCandidates = byX.slice(0, Math.min(7, byX.length));
-  
-  // Among row candidates, find 5 that have similar X positions
-  const rowGroup = findAlignedGroup(rowCandidates, "x", 5);
-  
-  if (!rowGroup || rowGroup.length < 5) {
-    // Fallback: just take rightmost 5
-    const rowPanels = byX.slice(0, 5).sort((a, b) => a.cy - b.cy);
-    const remaining = candidates.filter(p => !rowPanels.includes(p));
-    const colPanels = remaining
-      .sort((a, b) => b.cy - a.cy)
-      .slice(0, 5)
-      .sort((a, b) => a.cx - b.cx);
-    
-    if (rowPanels.length === 5 && colPanels.length >= 5) {
-      return { rowPanels, colPanels: colPanels.slice(0, 5) };
+  // Try to find 5 rightmost panels that are vertically aligned
+  let rowPanels = null;
+  for (let i = 0; i < Math.min(3, byX.length); i++) {
+    const anchor = byX[i];
+    const tolerance = anchor.w * 2;
+    const aligned = candidates
+      .filter(p => Math.abs(p.cx - anchor.cx) < tolerance)
+      .sort((a, b) => a.cy - b.cy);
+    if (aligned.length >= 5) {
+      rowPanels = aligned.slice(0, 5);
+      break;
     }
-    return null;
   }
 
-  const rowPanels = rowGroup.sort((a, b) => a.cy - b.cy);
+  if (!rowPanels) {
+    // Fallback: just take rightmost 5
+    rowPanels = byX.slice(0, 5).sort((a, b) => a.cy - b.cy);
+  }
+
+  // Col panels: from remaining, find 5 that are horizontally aligned at bottom
   const remaining = candidates.filter(p => !rowPanels.includes(p));
   
-  // Col hints: bottom group among remaining
-  const colGroup = findAlignedGroup(remaining, "y", 5) || 
-    remaining.sort((a, b) => b.cy - a.cy).slice(0, 5);
-  const colPanels = colGroup.sort((a, b) => a.cx - b.cx);
-
-  if (rowPanels.length === 5 && colPanels.length >= 5) {
-    return { rowPanels, colPanels: colPanels.slice(0, 5) };
-  }
-
-  return null;
-}
-
-/**
- * Find a group of `count` panels that are aligned along one axis.
- */
-function findAlignedGroup(panels, axis, count) {
-  if (panels.length < count) return null;
-  const prop = axis === "x" ? "cx" : "cy";
-  
-  // Try each panel as an anchor and find others with similar coord
-  for (let i = 0; i < panels.length; i++) {
-    const anchor = panels[i][prop];
-    const tolerance = panels[i][axis === "x" ? "w" : "h"] * 1.5;
-    const aligned = panels.filter(p => Math.abs(p[prop] - anchor) < tolerance);
-    if (aligned.length >= count) {
-      return aligned.slice(0, count);
+  let colPanels = null;
+  const byY = [...remaining].sort((a, b) => b.cy - a.cy);
+  for (let i = 0; i < Math.min(3, byY.length); i++) {
+    const anchor = byY[i];
+    const tolerance = anchor.h * 2;
+    const aligned = remaining
+      .filter(p => Math.abs(p.cy - anchor.cy) < tolerance)
+      .sort((a, b) => a.cx - b.cx);
+    if (aligned.length >= 5) {
+      colPanels = aligned.slice(0, 5);
+      break;
     }
   }
+
+  if (!colPanels) {
+    colPanels = byY.slice(0, 5).sort((a, b) => a.cx - b.cx);
+  }
+
+  if (rowPanels.length >= 5 && colPanels.length >= 5) {
+    return { rowPanels: rowPanels.slice(0, 5), colPanels: colPanels.slice(0, 5) };
+  }
+
   return null;
 }
 
