@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback } from "react";
 import PhotoCapture from "./PhotoCapture";
 
 /* ═══════════════════════════════════════════════════════
@@ -499,15 +499,17 @@ export default function VoltorbGBA() {
     }
   };
 
-  const handleQuickInput = (e) => {
-    const val = e.target.value;
-    // Only accept single digits for bombs, up to 2 digits for pts
-    const isBombs = qeIndex % 2 === 1;
-    const maxLen = isBombs ? 1 : 2;
+  const getQeValue = () => {
+    if (qeIndex < 10) {
+      const rowIdx = Math.floor(qeIndex / 2);
+      return qeIndex % 2 === 0 ? rowH[rowIdx].pts : rowH[rowIdx].bombs;
+    } else {
+      const colIdx = Math.floor((qeIndex - 10) / 2);
+      return qeIndex % 2 === 0 ? colH[colIdx].pts : colH[colIdx].bombs;
+    }
+  };
 
-    if (val.length > maxLen) return;
-
-    // Update the appropriate hint
+  const setQeValue = (val) => {
     if (qeIndex < 10) {
       const rowIdx = Math.floor(qeIndex / 2);
       const field = qeIndex % 2 === 0 ? "pts" : "bombs";
@@ -521,33 +523,48 @@ export default function VoltorbGBA() {
       newCol[colIdx] = { ...newCol[colIdx], [field]: val };
       setColH(newCol);
     }
+  };
 
-    // Auto-advance: move to next field if value is "complete"
-    // For bombs (single digit): advance immediately on any digit
-    // For pts: advance if 2 digits entered, or if it's a valid single digit (0-9) wait for second
-    if (isBombs && val.length === 1 && val >= "0") {
+  // Handle numpad digit tap
+  const handleNumpadTap = (digit) => {
+    const isBombs = qeIndex % 2 === 1;
+    const current = getQeValue();
+
+    if (isBombs) {
+      // Single digit for bombs — set and advance
+      setQeValue(String(digit));
       advanceQe();
-    } else if (!isBombs && val.length === 2) {
-      advanceQe();
+    } else {
+      // Up to 2 digits for pts
+      if (current.length < 2) {
+        const newVal = current + String(digit);
+        setQeValue(newVal);
+        // Auto-advance if 2 digits or if first digit > 1 (can't be part of valid 2-digit ≤15)
+        if (newVal.length === 2 || digit > 1) {
+          // Small delay so the value renders before advancing
+          setTimeout(() => advanceQe(), 100);
+        }
+      }
     }
   };
 
-  const handleQuickKeyDown = (e) => {
-    if (e.key === "Enter" || e.key === "Tab") {
-      e.preventDefault();
-      advanceQe();
-    } else if (e.key === "Backspace" && e.target.value === "") {
-      e.preventDefault();
-      // Go back to previous field
-      if (qeIndex > 0) setQeIndex(qeIndex - 1);
+  const handleNumpadBack = () => {
+    const current = getQeValue();
+    if (current.length > 0) {
+      setQeValue(current.slice(0, -1));
+    } else if (qeIndex > 0) {
+      setQeIndex(qeIndex - 1);
     }
+  };
+
+  const handleNumpadNext = () => {
+    advanceQe();
   };
 
   const advanceQe = () => {
     if (qeIndex < 19) {
       setQeIndex(qeIndex + 1);
     } else {
-      // All fields filled — exit quick entry
       setQuickEntry(false);
     }
   };
@@ -793,59 +810,77 @@ export default function VoltorbGBA() {
             background: "#1A5A3A", borderRadius: 4,
             border: "2px solid #FFD70066",
           }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+            {/* Current field label + value display */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
               <span style={{
-                fontFamily: "'Press Start 2P', monospace", fontSize: 7, color: "#FFD700",
+                fontFamily: "'Press Start 2P', monospace", fontSize: 8, color: "#FFD700",
               }}>{getQeLabel(qeIndex)}</span>
+              <div style={{
+                fontFamily: "'Press Start 2P', monospace", fontSize: 18, color: "#FFF",
+                background: "#0A3A2A", border: "2px solid #FFD700",
+                borderRadius: 4, padding: "4px 12px", minWidth: 44, textAlign: "center",
+              }}>
+                {getQeValue() || "_"}
+              </div>
               <span style={{
                 fontFamily: "'Press Start 2P', monospace", fontSize: 6, color: "#A0E8C0",
               }}>{qeIndex + 1}/20</span>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <input
-                autoFocus
-                key={qeIndex}
-                type="number"
-                inputMode="numeric"
-                min="0"
-                max={qeIndex % 2 === 1 ? "5" : "15"}
-                value={qeIndex < 10
-                  ? (qeIndex % 2 === 0 ? rowH[Math.floor(qeIndex / 2)].pts : rowH[Math.floor(qeIndex / 2)].bombs)
-                  : (qeIndex % 2 === 0 ? colH[Math.floor((qeIndex - 10) / 2)].pts : colH[Math.floor((qeIndex - 10) / 2)].bombs)
-                }
-                onChange={handleQuickInput}
-                onKeyDown={handleQuickKeyDown}
-                style={{
-                  flex: 1, height: 36,
-                  fontFamily: "'Press Start 2P', monospace", fontSize: 14,
-                  color: "#FFF", background: "#0A3A2A",
-                  border: "2px solid #FFD700", borderRadius: 4,
-                  textAlign: "center", outline: "none",
+
+            {/* Custom numpad */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4 }}>
+              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 0].map((d) => (
+                <button key={d} onClick={() => handleNumpadTap(d)} style={{
+                  height: 40, borderRadius: 4,
+                  fontFamily: "'Press Start 2P', monospace", fontSize: 12,
+                  color: "#FFF", background: "#2A7A5A",
+                  border: "2px solid #1A5A3A", cursor: "pointer",
+                  boxShadow: "0 2px 0 #1A4A3A",
+                  transition: "transform 0.05s",
                 }}
-              />
-              <button onClick={() => { if (qeIndex > 0) setQeIndex(qeIndex - 1); }} style={{
-                fontFamily: "'Press Start 2P', monospace", fontSize: 10,
-                color: "#A0E8C0", background: "transparent",
-                border: "1px solid #A0E8C044", borderRadius: 4,
-                padding: "6px 10px", cursor: "pointer",
-              }}>◄</button>
-              <button onClick={advanceQe} style={{
-                fontFamily: "'Press Start 2P', monospace", fontSize: 10,
-                color: "#A0E8C0", background: "transparent",
-                border: "1px solid #A0E8C044", borderRadius: 4,
-                padding: "6px 10px", cursor: "pointer",
-              }}>►</button>
-              <button onClick={() => setQuickEntry(false)} style={{
-                fontFamily: "'Press Start 2P', monospace", fontSize: 8,
-                color: "#FF8888", background: "transparent",
-                border: "1px solid #FF888844", borderRadius: 4,
-                padding: "6px 10px", cursor: "pointer",
-              }}>✕</button>
+                  onTouchStart={(e) => { e.currentTarget.style.transform = "translateY(2px)"; e.currentTarget.style.boxShadow = "none"; }}
+                  onTouchEnd={(e) => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = "0 2px 0 #1A4A3A"; }}
+                  onMouseDown={(e) => { e.currentTarget.style.transform = "translateY(2px)"; e.currentTarget.style.boxShadow = "none"; }}
+                  onMouseUp={(e) => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = "0 2px 0 #1A4A3A"; }}
+                >{d}</button>
+              ))}
+              {/* Back button */}
+              <button onClick={handleNumpadBack} style={{
+                height: 40, borderRadius: 4,
+                fontFamily: "'Press Start 2P', monospace", fontSize: 9,
+                color: "#FF8888", background: "#2A4A3A",
+                border: "2px solid #1A3A2A", cursor: "pointer",
+                boxShadow: "0 2px 0 #0A2A1A",
+              }}
+                onTouchStart={(e) => { e.currentTarget.style.transform = "translateY(2px)"; }}
+                onTouchEnd={(e) => { e.currentTarget.style.transform = ""; }}
+                onMouseDown={(e) => { e.currentTarget.style.transform = "translateY(2px)"; }}
+                onMouseUp={(e) => { e.currentTarget.style.transform = ""; }}
+              >◄ DEL</button>
+              {/* Next button */}
+              <button onClick={handleNumpadNext} style={{
+                height: 40, borderRadius: 4,
+                fontFamily: "'Press Start 2P', monospace", fontSize: 9,
+                color: "#FFD700", background: "#2A4A3A",
+                border: "2px solid #FFD70044", cursor: "pointer",
+                boxShadow: "0 2px 0 #0A2A1A",
+              }}
+                onTouchStart={(e) => { e.currentTarget.style.transform = "translateY(2px)"; }}
+                onTouchEnd={(e) => { e.currentTarget.style.transform = ""; }}
+                onMouseDown={(e) => { e.currentTarget.style.transform = "translateY(2px)"; }}
+                onMouseUp={(e) => { e.currentTarget.style.transform = ""; }}
+              >NEXT ►</button>
             </div>
-            <div style={{
-              marginTop: 4, fontFamily: "'Press Start 2P', monospace",
-              fontSize: 6, color: "#A0E8C088",
-            }}>ENTER/TAB → NEXT · BACKSPACE → PREV</div>
+
+            {/* Close button */}
+            <div style={{ display: "flex", justifyContent: "center", marginTop: 6 }}>
+              <button onClick={() => setQuickEntry(false)} style={{
+                fontFamily: "'Press Start 2P', monospace", fontSize: 7,
+                color: "#A0E8C0", background: "transparent",
+                border: "1px solid #A0E8C044", borderRadius: 4,
+                padding: "5px 12px", cursor: "pointer",
+              }}>DONE</button>
+            </div>
           </div>
         )}
 
