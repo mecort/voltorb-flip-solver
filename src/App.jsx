@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import PhotoCapture from "./PhotoCapture";
 
 /* ═══════════════════════════════════════════════════════
@@ -355,25 +355,30 @@ const HINT_COLORS = [
   { bg: "#A868C8", border: "#8848A8", label: "#FFF" },
 ];
 
-function HintPanel({ value, onChange, colorIndex }) {
+function HintPanel({ value, onChange, colorIndex, ptsActive, bombsActive, onPtsFocus, onBombsFocus }) {
   const c = HINT_COLORS[colorIndex % 5];
   return (
     <div className="hint-panel" style={{
-      background: c.bg, border: `2px solid ${c.border}`,
+      background: c.bg, border: `2px solid ${ptsActive || bombsActive ? "#FFD700" : c.border}`,
       borderRadius: 3, display: "flex", flexDirection: "column",
       alignItems: "center", justifyContent: "center",
       padding: "2px 0", gap: 0,
-      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.3), 0 1px 2px rgba(0,0,0,0.2)",
+      boxShadow: (ptsActive || bombsActive)
+        ? "0 0 8px #FFD70088, inset 0 1px 0 rgba(255,255,255,0.3)"
+        : "inset 0 1px 0 rgba(255,255,255,0.3), 0 1px 2px rgba(0,0,0,0.2)",
     }}>
       <input
         type="number" min="0" max="15" inputMode="numeric"
         value={value.pts} placeholder="00"
         onChange={(e) => onChange({ ...value, pts: e.target.value })}
+        onFocus={onPtsFocus}
         style={{
-          width: "100%", border: "none", background: "transparent",
+          width: "100%", border: "none",
+          background: ptsActive ? "rgba(255,215,0,0.2)" : "transparent",
           fontFamily: "'Press Start 2P', monospace", fontSize: 11,
           color: c.label, textAlign: "center", outline: "none",
           padding: "1px 0", textShadow: "0 1px 1px rgba(0,0,0,0.4)",
+          borderRadius: "2px 2px 0 0",
         }}
       />
       <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
@@ -382,11 +387,14 @@ function HintPanel({ value, onChange, colorIndex }) {
           type="number" min="0" max="5" inputMode="numeric"
           value={value.bombs} placeholder="0"
           onChange={(e) => onChange({ ...value, bombs: e.target.value })}
+          onFocus={onBombsFocus}
           style={{
-            width: 18, border: "none", background: "transparent",
+            width: 18, border: "none",
+            background: bombsActive ? "rgba(255,215,0,0.2)" : "transparent",
             fontFamily: "'Press Start 2P', monospace", fontSize: 10,
             color: c.label, textAlign: "center", outline: "none",
             padding: 0, textShadow: "0 1px 1px rgba(0,0,0,0.4)",
+            borderRadius: 2,
           }}
         />
       </div>
@@ -473,6 +481,81 @@ export default function VoltorbGBA() {
   const [error, setError] = useState("");
   const [revealed, setRevealed] = useState(false);
   const [flipPicker, setFlipPicker] = useState(null); // {r, c} or null
+  const [quickEntry, setQuickEntry] = useState(false);
+  const [qeIndex, setQeIndex] = useState(0); // 0-19: which field is active
+
+  // Quick entry: 20 fields total
+  // 0-9: row hints (R1pts, R1bombs, R2pts, R2bombs, ..., R5pts, R5bombs)
+  // 10-19: col hints (C1pts, C1bombs, ..., C5pts, C5bombs)
+  const getQeLabel = (idx) => {
+    if (idx < 10) {
+      const row = Math.floor(idx / 2) + 1;
+      const field = idx % 2 === 0 ? "PTS" : "BMB";
+      return `R${row} ${field}`;
+    } else {
+      const col = Math.floor((idx - 10) / 2) + 1;
+      const field = idx % 2 === 0 ? "PTS" : "BMB";
+      return `C${col} ${field}`;
+    }
+  };
+
+  const handleQuickInput = (e) => {
+    const val = e.target.value;
+    // Only accept single digits for bombs, up to 2 digits for pts
+    const isBombs = qeIndex % 2 === 1;
+    const maxLen = isBombs ? 1 : 2;
+
+    if (val.length > maxLen) return;
+
+    // Update the appropriate hint
+    if (qeIndex < 10) {
+      const rowIdx = Math.floor(qeIndex / 2);
+      const field = qeIndex % 2 === 0 ? "pts" : "bombs";
+      const newRow = [...rowH];
+      newRow[rowIdx] = { ...newRow[rowIdx], [field]: val };
+      setRowH(newRow);
+    } else {
+      const colIdx = Math.floor((qeIndex - 10) / 2);
+      const field = qeIndex % 2 === 0 ? "pts" : "bombs";
+      const newCol = [...colH];
+      newCol[colIdx] = { ...newCol[colIdx], [field]: val };
+      setColH(newCol);
+    }
+
+    // Auto-advance: move to next field if value is "complete"
+    // For bombs (single digit): advance immediately on any digit
+    // For pts: advance if 2 digits entered, or if it's a valid single digit (0-9) wait for second
+    if (isBombs && val.length === 1 && val >= "0") {
+      advanceQe();
+    } else if (!isBombs && val.length === 2) {
+      advanceQe();
+    }
+  };
+
+  const handleQuickKeyDown = (e) => {
+    if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault();
+      advanceQe();
+    } else if (e.key === "Backspace" && e.target.value === "") {
+      e.preventDefault();
+      // Go back to previous field
+      if (qeIndex > 0) setQeIndex(qeIndex - 1);
+    }
+  };
+
+  const advanceQe = () => {
+    if (qeIndex < 19) {
+      setQeIndex(qeIndex + 1);
+    } else {
+      // All fields filled — exit quick entry
+      setQuickEntry(false);
+    }
+  };
+
+  const startQuickEntry = () => {
+    setQuickEntry(true);
+    setQeIndex(0);
+  };
 
   const loadDemo = () => {
     const { rowHints, colHints } = generateRandomBoard();
@@ -633,7 +716,12 @@ export default function VoltorbGBA() {
               );
             })}
             <HintPanel value={rowH[r]} colorIndex={r}
-              onChange={(v) => { const n = [...rowH]; n[r] = v; setRowH(n); }} />
+              onChange={(v) => { const n = [...rowH]; n[r] = v; setRowH(n); }}
+              ptsActive={quickEntry && qeIndex === r * 2}
+              bombsActive={quickEntry && qeIndex === r * 2 + 1}
+              onPtsFocus={() => { if (quickEntry) setQeIndex(r * 2); }}
+              onBombsFocus={() => { if (quickEntry) setQeIndex(r * 2 + 1); }}
+            />
           </div>
         ))}
 
@@ -641,7 +729,12 @@ export default function VoltorbGBA() {
         <div style={{ display: "flex", gap: 3 }}>
           {colH.map((h, c) => (
             <HintPanel key={c} value={h} colorIndex={c}
-              onChange={(v) => { const n = [...colH]; n[c] = v; setColH(n); }} />
+              onChange={(v) => { const n = [...colH]; n[c] = v; setColH(n); }}
+              ptsActive={quickEntry && qeIndex === 10 + c * 2}
+              bombsActive={quickEntry && qeIndex === 10 + c * 2 + 1}
+              onPtsFocus={() => { if (quickEntry) setQeIndex(10 + c * 2); }}
+              onBombsFocus={() => { if (quickEntry) setQeIndex(10 + c * 2 + 1); }}
+            />
           ))}
         </div>
 
@@ -693,9 +786,73 @@ export default function VoltorbGBA() {
           </div>
         )}
 
+        {/* ═══ QUICK ENTRY ═══ */}
+        {quickEntry && (
+          <div style={{
+            marginTop: 8, padding: "8px 10px",
+            background: "#1A5A3A", borderRadius: 4,
+            border: "2px solid #FFD70066",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <span style={{
+                fontFamily: "'Press Start 2P', monospace", fontSize: 7, color: "#FFD700",
+              }}>{getQeLabel(qeIndex)}</span>
+              <span style={{
+                fontFamily: "'Press Start 2P', monospace", fontSize: 6, color: "#A0E8C0",
+              }}>{qeIndex + 1}/20</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                autoFocus
+                key={qeIndex}
+                type="number"
+                inputMode="numeric"
+                min="0"
+                max={qeIndex % 2 === 1 ? "5" : "15"}
+                value={qeIndex < 10
+                  ? (qeIndex % 2 === 0 ? rowH[Math.floor(qeIndex / 2)].pts : rowH[Math.floor(qeIndex / 2)].bombs)
+                  : (qeIndex % 2 === 0 ? colH[Math.floor((qeIndex - 10) / 2)].pts : colH[Math.floor((qeIndex - 10) / 2)].bombs)
+                }
+                onChange={handleQuickInput}
+                onKeyDown={handleQuickKeyDown}
+                style={{
+                  flex: 1, height: 36,
+                  fontFamily: "'Press Start 2P', monospace", fontSize: 14,
+                  color: "#FFF", background: "#0A3A2A",
+                  border: "2px solid #FFD700", borderRadius: 4,
+                  textAlign: "center", outline: "none",
+                }}
+              />
+              <button onClick={() => { if (qeIndex > 0) setQeIndex(qeIndex - 1); }} style={{
+                fontFamily: "'Press Start 2P', monospace", fontSize: 10,
+                color: "#A0E8C0", background: "transparent",
+                border: "1px solid #A0E8C044", borderRadius: 4,
+                padding: "6px 10px", cursor: "pointer",
+              }}>◄</button>
+              <button onClick={advanceQe} style={{
+                fontFamily: "'Press Start 2P', monospace", fontSize: 10,
+                color: "#A0E8C0", background: "transparent",
+                border: "1px solid #A0E8C044", borderRadius: 4,
+                padding: "6px 10px", cursor: "pointer",
+              }}>►</button>
+              <button onClick={() => setQuickEntry(false)} style={{
+                fontFamily: "'Press Start 2P', monospace", fontSize: 8,
+                color: "#FF8888", background: "transparent",
+                border: "1px solid #FF888844", borderRadius: 4,
+                padding: "6px 10px", cursor: "pointer",
+              }}>✕</button>
+            </div>
+            <div style={{
+              marginTop: 4, fontFamily: "'Press Start 2P', monospace",
+              fontSize: 6, color: "#A0E8C088",
+            }}>ENTER/TAB → NEXT · BACKSPACE → PREV</div>
+          </div>
+        )}
+
         {/* ═══ BUTTONS ═══ */}
         <div style={{ display: "flex", gap: 8, marginTop: 10, justifyContent: "center", flexWrap: "wrap" }}>
           <GameBtn label="SOLVE" variant="primary" onClick={handleSolve} />
+          {!quickEntry && <GameBtn label="QUICK" variant="gold" onClick={startQuickEntry} />}
           <GameBtn label="DEMO" variant="secondary" onClick={loadDemo} />
           <GameBtn label="CLEAR" variant="danger" onClick={clearAll} />
         </div>
