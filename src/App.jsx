@@ -267,14 +267,72 @@ function GameBtn({ label, variant = "primary", onClick }) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   APP CONSTANTS
+   APP CONSTANTS & RANDOM BOARD GENERATOR
 ═══════════════════════════════════════════════════════ */
 const N = 5;
 const mkHints = () => Array.from({ length: N }, () => ({ pts: "", bombs: "" }));
-const DEMO = {
-  row: [{ pts:"3",bombs:"2" },{ pts:"5",bombs:"1" },{ pts:"5",bombs:"2" },{ pts:"4",bombs:"1" },{ pts:"8",bombs:"0" }],
-  col: [{ pts:"5",bombs:"0" },{ pts:"5",bombs:"2" },{ pts:"4",bombs:"1" },{ pts:"3",bombs:"3" },{ pts:"8",bombs:"0" }],
-};
+
+/**
+ * Generate a random 5x5 Voltorb Flip board that is guaranteed solvable.
+ * Strategy: fill a 5x5 grid with values (0,1,2,3), then derive the hints.
+ * Uses difficulty-based bomb counts similar to the actual game levels.
+ */
+function generateRandomBoard() {
+  // Pick a random difficulty: number of voltorbs (bombs) on the board
+  // Game levels typically have 6-10 voltorbs
+  const totalBombs = 5 + Math.floor(Math.random() * 6); // 5–10 bombs
+
+  // Create a flat array of 25 cell values
+  const cells = new Array(25).fill(1);
+
+  // Place voltorbs (0s)
+  const indices = Array.from({ length: 25 }, (_, i) => i);
+  for (let i = 0; i < totalBombs; i++) {
+    const pick = Math.floor(Math.random() * (25 - i)) + i;
+    [indices[i], indices[pick]] = [indices[pick], indices[i]];
+  }
+  for (let i = 0; i < totalBombs; i++) {
+    cells[indices[i]] = 0;
+  }
+
+  // Upgrade some non-bomb cells to 2s and 3s
+  const nonBombIndices = [];
+  for (let i = 0; i < 25; i++) {
+    if (cells[i] !== 0) nonBombIndices.push(i);
+  }
+  // Shuffle non-bomb indices
+  for (let i = nonBombIndices.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [nonBombIndices[i], nonBombIndices[j]] = [nonBombIndices[j], nonBombIndices[i]];
+  }
+  // Assign some 2s and 3s (roughly 3-6 multipliers)
+  const numMultipliers = Math.min(3 + Math.floor(Math.random() * 4), nonBombIndices.length);
+  for (let i = 0; i < numMultipliers; i++) {
+    cells[nonBombIndices[i]] = Math.random() < 0.6 ? 2 : 3;
+  }
+
+  // Build 5x5 grid
+  const grid = [];
+  for (let r = 0; r < 5; r++) {
+    grid.push(cells.slice(r * 5, r * 5 + 5));
+  }
+
+  // Derive row and column hints
+  const rowHints = grid.map((row) => ({
+    pts: String(row.reduce((a, b) => a + b, 0)),
+    bombs: String(row.filter((v) => v === 0).length),
+  }));
+
+  const colHints = Array.from({ length: 5 }, (_, c) => {
+    const col = grid.map((row) => row[c]);
+    return {
+      pts: String(col.reduce((a, b) => a + b, 0)),
+      bombs: String(col.filter((v) => v === 0).length),
+    };
+  });
+
+  return { rowHints, colHints };
+}
 
 /* ═══════════════════════════════════════════════════════
    MAIN COMPONENT
@@ -287,8 +345,9 @@ export default function VoltorbGBA() {
   const [revealed, setRevealed] = useState(false);
 
   const loadDemo = () => {
-    setRowH(DEMO.row.map((h) => ({ ...h })));
-    setColH(DEMO.col.map((h) => ({ ...h })));
+    const { rowHints, colHints } = generateRandomBoard();
+    setRowH(rowHints);
+    setColH(colHints);
     setResult(null); setError(""); setRevealed(false);
   };
   const handlePhotoHints = (rowResults, colResults) => {
@@ -460,7 +519,7 @@ export default function VoltorbGBA() {
         {/* ═══ BUTTONS ═══ */}
         <div style={{ display: "flex", gap: 8, marginTop: 10, justifyContent: "center", flexWrap: "wrap" }}>
           <GameBtn label="SOLVE" variant="primary" onClick={handleSolve} />
-          <GameBtn label="DEMO" variant="secondary" onClick={loadDemo} />
+          <GameBtn label="RANDOM" variant="secondary" onClick={loadDemo} />
           <GameBtn label="CLEAR" variant="danger" onClick={clearAll} />
         </div>
 
