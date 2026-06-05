@@ -187,6 +187,84 @@ function clusterPoints(points, maxDist) {
 /* ─── Classify panels into row hints and column hints ─── */
 
 /**
+ * Detect if a region contains a Voltorb icon.
+ * The Voltorb is a red/orange circle with a white center dot and a
+ * horizontal line through it. It's always in the bottom-left of a hint panel.
+ * 
+ * We look for a cluster of red pixels (the ball) in the lower portion of the panel.
+ * Returns: { found: boolean, x, y, radius } of the icon center
+ */
+function detectVoltorbIcon(canvas, panel) {
+  const ctx = canvas.getContext("2d");
+  const px = Math.round(panel.x);
+  const py = Math.round(panel.y);
+  const pw = Math.round(panel.w);
+  const ph = Math.round(panel.h);
+
+  if (pw < 4 || ph < 4) return { found: false };
+
+  // The Voltorb icon is in the bottom half of the panel, left side
+  // Scan the bottom-left quadrant for red/orange pixels (the ball body)
+  const scanX = px;
+  const scanY = py + Math.floor(ph * 0.4);
+  const scanW = Math.floor(pw * 0.6);
+  const scanH = ph - Math.floor(ph * 0.4);
+
+  if (scanW < 3 || scanH < 3) return { found: false };
+  if (scanX + scanW > canvas.width || scanY + scanH > canvas.height) return { found: false };
+
+  const imgData = ctx.getImageData(scanX, scanY, scanW, scanH);
+  const data = imgData.data;
+
+  // Count "voltorb red" pixels — the icon body is a warm red/orange-red
+  // RGB roughly: R>160, G<130, B<130, R > G+40
+  let redCount = 0;
+  let redSumX = 0, redSumY = 0;
+
+  for (let y = 0; y < scanH; y++) {
+    for (let x = 0; x < scanW; x++) {
+      const i = (y * scanW + x) * 4;
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      // Voltorb red: warm red, not too dark, not too bright
+      if (r > 150 && g < 140 && b < 140 && r > g + 30 && r > b + 30) {
+        redCount++;
+        redSumX += x;
+        redSumY += y;
+      }
+    }
+  }
+
+  // The voltorb icon should occupy roughly 5-30% of the scanned area
+  const scanArea = scanW * scanH;
+  const redRatio = redCount / scanArea;
+
+  if (redRatio > 0.04 && redRatio < 0.4 && redCount > 10) {
+    const iconCx = scanX + redSumX / redCount;
+    const iconCy = scanY + redSumY / redCount;
+    const approxRadius = Math.sqrt(redCount / Math.PI);
+    return { found: true, x: iconCx, y: iconCy, radius: approxRadius };
+  }
+
+  return { found: false };
+}
+
+/**
+ * Validate panel candidates by checking for Voltorb icon presence.
+ * Panels with a Voltorb icon are confirmed hint panels.
+ * Panels without are likely false positives (UI buttons, etc.)
+ */
+function validatePanelsWithVoltorb(canvas, panels) {
+  const validated = [];
+  for (const panel of panels) {
+    const icon = detectVoltorbIcon(canvas, panel);
+    if (icon.found) {
+      validated.push({ ...panel, voltorb: icon });
+    }
+  }
+  return validated;
+}
+
+/**
  * Given found panels, separate into row hints (right-side vertical group)
  * and column hints (bottom horizontal group).
  * 
@@ -454,35 +532,75 @@ function readBombs(canvas, region) {
 /* ─── Main processing pipeline ─── */
 
 function processGameScreenshot(canvas) {
-  // 1. Find all colored panels
+  // 1. Find all colored panels by their background color
   const panels = findColoredPanels(canvas);
 
   if (panels.length < 6) {
-    throw new Error(`Found only ${panels.length} panels. Need at least 10. Try a clearer photo with the full board visible.`);
+    throw new Error(`Found only ${panels.length} colored regions. Need at least 10. Try a clearer photo.`);
   }
 
-  // 2. Classify into row and column hints
-  const classified = classifyPanels(panels);
+  // 2. Validate with Voltorb icon detection — only keep panels that have the icon
+  const validated = validatePanelsWithVoltorb(canvas, panels);
+
+  // Use validated panels if we got enough, otherwise fall back to color-only
+  const usePanels = validated.length >= 8 ? validated : panels;
+
+  if (usePanels.length < 6) {
+    throw new Error(`Could not confirm enough hint panels (found ${validated.length} with Voltorb icons). Try again.`);
+  }
+
+  // 3. Classify into row hints (right side) and column hints (bottom)
+  const classified = classifyPanels(usePanels);
   if (!classified) {
-    throw new Error(`Could not identify row/column layout from ${panels.length} panels. Try again.`);
+    throw new Error(`Could not identify row/column layout from ${usePanels.length} panels. Try again.`);
   }
 
   const { rowPanels, colPanels } = classified;
 
-  // 3. Read digits from each panel
+  // 4. Read digits from each panel
+  // Use Voltorb icon position (if available) to better locate digit regions
   const readPanel = (panel) => {
-    const ptsRegion = {
-      x: panel.x + panel.w * 0.1,
-      y: panel.y + panel.h * 0.0,
-      w: panel.w * 0.8,
-      h: panel.h * 0.45,
-    };
-    const bombRegion = {
-      x: panel.x + panel.w * 0.45,
-      y: panel.y + panel.h * 0.52,
-      w: panel.w * 0.48,
-      h: panel.h * 0.42,
-    };
+    let ptsRegion, bombRegion;
+
+    if (panel.voltorb && panel.voltorb.found) {
+      // Use voltorb position as anchor — digits are above it (pts) and to its right (bombs)
+      const icon = panel.voltorb;
+      const iconR = icon.radius * 1.2;
+
+      // Points: everything above the icon's top edge, full panel width
+      ptsRegion = {
+        x: panel.x + panel.w * 0.05,
+        y: panel.y,
+        w: panel.w * 0.9,
+        h: (icon.y - iconR) - panel.y,
+      };
+      // Bombs: to the right of the icon center
+      bombRegion = {
+        x: icon.x + iconR * 0.5,
+        y: icon.y - iconR,
+        w: (panel.x + panel.w) - (icon.x + iconR * 0.5) - panel.w * 0.05,
+        h: iconR * 2.2,
+      };
+    } else {
+      // Fallback: use fixed proportions
+      ptsRegion = {
+        x: panel.x + panel.w * 0.1,
+        y: panel.y + panel.h * 0.0,
+        w: panel.w * 0.8,
+        h: panel.h * 0.45,
+      };
+      bombRegion = {
+        x: panel.x + panel.w * 0.45,
+        y: panel.y + panel.h * 0.52,
+        w: panel.w * 0.48,
+        h: panel.h * 0.42,
+      };
+    }
+
+    // Ensure regions are valid
+    if (ptsRegion.h < 3) ptsRegion = { x: panel.x + panel.w * 0.1, y: panel.y, w: panel.w * 0.8, h: panel.h * 0.45 };
+    if (bombRegion.w < 3) bombRegion = { x: panel.x + panel.w * 0.45, y: panel.y + panel.h * 0.52, w: panel.w * 0.48, h: panel.h * 0.42 };
+
     const pts = readPoints(canvas, ptsRegion);
     const bombs = readBombs(canvas, bombRegion);
     return {
@@ -494,7 +612,7 @@ function processGameScreenshot(canvas) {
   const rowResults = rowPanels.map(readPanel);
   const colResults = colPanels.map(readPanel);
 
-  return { rowResults, colResults, rowPanels, colPanels, allPanels: panels };
+  return { rowResults, colResults, rowPanels, colPanels, allPanels: panels, validatedCount: validated.length };
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -516,7 +634,7 @@ export default function PhotoCapture({ onHintsDetected }) {
 
     try {
       const canvas = await loadImageToCanvas(file);
-      const { rowResults, colResults, rowPanels, colPanels, allPanels } = processGameScreenshot(canvas);
+      const { rowResults, colResults, rowPanels, colPanels, allPanels, validatedCount } = processGameScreenshot(canvas);
 
       // Generate debug overlay
       const dCanvas = document.createElement("canvas");
@@ -533,11 +651,28 @@ export default function PhotoCapture({ onHintsDetected }) {
       // Draw row panels (thick green)
       dCtx.strokeStyle = "#00FF00";
       dCtx.lineWidth = Math.max(2, canvas.width * 0.003);
-      rowPanels.forEach(p => dCtx.strokeRect(p.x, p.y, p.w, p.h));
+      rowPanels.forEach((p, i) => {
+        dCtx.strokeRect(p.x, p.y, p.w, p.h);
+        // Draw voltorb icon center if found
+        if (p.voltorb && p.voltorb.found) {
+          dCtx.fillStyle = "#FF00FF";
+          dCtx.beginPath();
+          dCtx.arc(p.voltorb.x, p.voltorb.y, 4, 0, Math.PI * 2);
+          dCtx.fill();
+        }
+      });
 
       // Draw col panels (thick blue)
       dCtx.strokeStyle = "#00AAFF";
-      colPanels.forEach(p => dCtx.strokeRect(p.x, p.y, p.w, p.h));
+      colPanels.forEach((p, i) => {
+        dCtx.strokeRect(p.x, p.y, p.w, p.h);
+        if (p.voltorb && p.voltorb.found) {
+          dCtx.fillStyle = "#FF00FF";
+          dCtx.beginPath();
+          dCtx.arc(p.voltorb.x, p.voltorb.y, 4, 0, Math.PI * 2);
+          dCtx.fill();
+        }
+      });
 
       setDebugImg(dCanvas.toDataURL("image/jpeg", 0.5));
 
@@ -546,7 +681,7 @@ export default function PhotoCapture({ onHintsDetected }) {
 
       const rowStr = rowResults.map(r => `${r.pts}/${r.bombs}`).join(", ");
       const colStr = colResults.map(r => `${r.pts}/${r.bombs}`).join(", ");
-      setDebugInfo(`R:[${rowStr}] C:[${colStr}]`);
+      setDebugInfo(`R:[${rowStr}] C:[${colStr}] (${validatedCount}✓)`);
 
       setStatus("done");
       onHintsDetected(rowResults, colResults);

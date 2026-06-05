@@ -696,7 +696,7 @@ export default function VoltorbGBA() {
         {/* ═══ BUTTONS ═══ */}
         <div style={{ display: "flex", gap: 8, marginTop: 10, justifyContent: "center", flexWrap: "wrap" }}>
           <GameBtn label="SOLVE" variant="primary" onClick={handleSolve} />
-          <GameBtn label="RANDOM" variant="secondary" onClick={loadDemo} />
+          <GameBtn label="DEMO" variant="secondary" onClick={loadDemo} />
           <GameBtn label="CLEAR" variant="danger" onClick={clearAll} />
         </div>
 
