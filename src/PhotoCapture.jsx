@@ -1,114 +1,69 @@
 import { useState, useRef } from "react";
-import Tesseract from "tesseract.js";
 
 /* ═══════════════════════════════════════════════════════
-   SPATIAL TEXT EXTRACTION APPROACH
+   VISION API-POWERED PHOTO CAPTURE
    
    Strategy:
-   1. Run Tesseract on the full image to extract ALL text + bounding boxes
-   2. Filter to only digit sequences (0-9)
-   3. Find the spatial pattern: 5 vertically-aligned pairs on the right,
-      5 horizontally-aligned pairs on the bottom
-   4. Map those to row/col hints
+   1. User takes/uploads a photo
+   2. Convert to base64
+   3. Send to /api/scan (Vercel serverless → Gemini Flash)
+   4. Vision model reads the hint values from the image
+   5. Fill into the board
    
-   This works regardless of panel colors, image angle, or screenshot source
-   because we're just looking for numbers in the right spatial arrangement.
+   Falls back gracefully if the API is unavailable.
 ═══════════════════════════════════════════════════════ */
 
-async function loadImageToCanvas(file) {
-  const img = new Image();
-  const url = URL.createObjectURL(file);
-  await new Promise((resolve, reject) => {
-    img.onload = resolve;
-    img.onerror = reject;
-    img.src = url;
+const API_URL = "/api/scan";
+
+/**
+ * Convert a File to a base64 data URL string.
+ */
+async function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
   });
-  const canvas = document.createElement("canvas");
-  canvas.width = img.width;
-  canvas.height = img.height;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(img, 0, 0);
-  URL.revokeObjectURL(url);
-  return canvas;
 }
 
 /**
- * Extract all words/numbers from the image with their bounding box positions.
- * Returns array of { text, x, y, w, h, cx, cy }
+ * Send image to the vision API and get back structured hint data.
  */
-async function extractAllText(canvas, onProgress) {
-  const worker = await Tesseract.createWorker("eng", 1, {
-    logger: (m) => {
-      if (m.status === "recognizing text" && onProgress) {
-        onProgress(Math.round(m.progress * 80));
-      }
-    },
+async function scanImage(base64Image) {
+  const response = await fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: base64Image }),
   });
 
-  // Use PSM 11 (sparse text) — works best for game UIs with scattered numbers
-  await worker.setParameters({
-    tessedit_pageseg_mode: "11",
-  });
-
-  const { data } = await worker.recognize(canvas);
-  await worker.terminate();
-
-  // Extract individual words with their bounding boxes
-  const words = [];
-  if (data.words) {
-    for (const word of data.words) {
-      const text = word.text.trim();
-      if (!text) continue;
-      const { x0, y0, x1, y1 } = word.bbox;
-      words.push({
-        text,
-        x: x0, y: y0,
-        w: x1 - x0, h: y1 - y0,
-        cx: (x0 + x1) / 2,
-        cy: (y0 + y1) / 2,
-      });
-    }
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: "Request failed" }));
+    throw new Error(err.error || `API returned ${response.status}`);
   }
 
-  return words;
+  return response.json();
 }
 
 /**
- * Filter words to only those that look like valid hint numbers.
- * Points: 0-15 (often displayed as "03", "05", "08", "10", "12", etc.)
- * Bombs: 0-5 (single digit)
- * 
- * We look for words that are purely numeric and in valid ranges.
+ * Pattern matching functions (exported for testing).
+ * Used as fallback and for unit tests.
  */
-function filterNumericWords(words) {
+export function filterNumericWords(words) {
   const numeric = [];
   for (const word of words) {
-    // Clean: strip non-digit chars, common OCR errors
     const cleaned = word.text.replace(/[^0-9]/g, "");
     if (!cleaned) continue;
     const num = parseInt(cleaned, 10);
-    if (isNaN(num) || num > 15) continue; // Max valid value is 15
+    if (isNaN(num) || num > 15) continue;
     numeric.push({ ...word, value: num, cleaned });
   }
   return numeric;
 }
 
-/**
- * Find the Voltorb Flip hint pattern in the detected numbers.
- * 
- * The pattern we're looking for:
- * - RIGHT COLUMN: 5 groups of 2 numbers stacked vertically (pts on top, bombs below)
- *   These are on the right side of the image, evenly spaced vertically
- * - BOTTOM ROW: 5 groups of 2 numbers stacked vertically (pts on top, bombs below)
- *   These are at the bottom of the image, evenly spaced horizontally
- * 
- * Each "group" is a pts number (0-15) directly above a bombs number (0-5)
- * at roughly the same X position.
- */
-function findHintPattern(numbers, imgWidth, imgHeight) {
+export function findHintPattern(numbers, imgWidth, imgHeight) {
   if (numbers.length < 10) return null;
 
-  // Sort numbers into potential pairs (two numbers at similar X, one above the other)
   const pairs = [];
   const used = new Set();
 
@@ -119,13 +74,10 @@ function findHintPattern(numbers, imgWidth, imgHeight) {
       const a = numbers[i];
       const b = numbers[j];
 
-      // Same X position (within tolerance), a is above b
       const xTol = Math.max(a.w, b.w) * 1.5;
       const yGap = b.cy - a.cy;
 
       if (Math.abs(a.cx - b.cx) < xTol && yGap > 0 && yGap < Math.max(a.h, b.h) * 3) {
-        // a is on top (pts), b is below (bombs)
-        // Validate: pts should be 0-15, bombs should be 0-5
         if (a.value <= 15 && b.value <= 5) {
           pairs.push({
             pts: a.value,
@@ -143,12 +95,8 @@ function findHintPattern(numbers, imgWidth, imgHeight) {
 
   if (pairs.length < 5) return null;
 
-  // Find 5 pairs that form a vertical line (row hints — rightmost group)
-  // and 5 pairs that form a horizontal line (col hints — bottommost group)
-  
-  // Sort pairs by X position to find the rightmost vertical group
   const byX = [...pairs].sort((a, b) => b.cx - a.cx);
-  
+
   let rowHintPairs = null;
   for (let i = 0; i < Math.min(5, byX.length); i++) {
     const anchor = byX[i];
@@ -163,11 +111,9 @@ function findHintPattern(numbers, imgWidth, imgHeight) {
   }
 
   if (!rowHintPairs) {
-    // Fallback: just take 5 rightmost pairs sorted by Y
     rowHintPairs = byX.slice(0, 5).sort((a, b) => a.cy - b.cy);
   }
 
-  // Find col hints: from remaining pairs, find 5 at the bottom in a horizontal line
   const usedPairIndices = new Set(rowHintPairs.map(p => `${p.idxA}-${p.idxB}`));
   const remaining = pairs.filter(p => !usedPairIndices.has(`${p.idxA}-${p.idxB}`));
 
@@ -189,7 +135,6 @@ function findHintPattern(numbers, imgWidth, imgHeight) {
     colHintPairs = byY.slice(0, 5).sort((a, b) => a.cx - b.cx);
   }
 
-  // Convert to hint format
   const rowResults = (rowHintPairs || []).slice(0, 5).map(p => ({
     pts: String(p.pts),
     bombs: String(p.bombs),
@@ -199,7 +144,6 @@ function findHintPattern(numbers, imgWidth, imgHeight) {
     bombs: String(p.bombs),
   }));
 
-  // Pad to 5 if needed
   while (rowResults.length < 5) rowResults.push({ pts: "", bombs: "" });
   while (colResults.length < 5) colResults.push({ pts: "", bombs: "" });
 
@@ -211,101 +155,42 @@ function findHintPattern(numbers, imgWidth, imgHeight) {
 ═══════════════════════════════════════════════════════ */
 export default function PhotoCapture({ onHintsDetected }) {
   const [status, setStatus] = useState("idle");
-  const [progress, setProgress] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
   const [debugInfo, setDebugInfo] = useState("");
-  const [debugImg, setDebugImg] = useState(null);
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
 
   const processImage = async (file) => {
     setStatus("processing");
-    setProgress(0);
     setErrorMsg("");
     setDebugInfo("");
-    setDebugImg(null);
 
     try {
-      const canvas = await loadImageToCanvas(file);
-      setProgress(5);
+      // Convert file to base64
+      const base64 = await fileToBase64(file);
 
-      // 1. Extract all text from image
-      const words = await extractAllText(canvas, setProgress);
-      setProgress(85);
+      // Call vision API
+      const data = await scanImage(base64);
 
-      // 2. Filter to numeric values
-      const numbers = filterNumericWords(words);
+      // Convert API response to our hint format
+      const rowResults = data.rows.map(r => ({
+        pts: String(r.pts),
+        bombs: String(r.bombs),
+      }));
+      const colResults = data.cols.map(r => ({
+        pts: String(r.pts),
+        bombs: String(r.bombs),
+      }));
 
-      // 3. Find the hint pattern
-      const result = findHintPattern(numbers, canvas.width, canvas.height);
-
-      // 4. Generate debug overlay
-      const dCanvas = document.createElement("canvas");
-      dCanvas.width = canvas.width;
-      dCanvas.height = canvas.height;
-      const dCtx = dCanvas.getContext("2d");
-      dCtx.drawImage(canvas, 0, 0);
-
-      // Draw all detected numbers (small yellow dots)
-      dCtx.fillStyle = "#FFFF0088";
-      for (const n of numbers) {
-        dCtx.fillRect(n.x, n.y, n.w, n.h);
-      }
-
-      if (result) {
-        // Draw row hint pairs (green boxes)
-        dCtx.strokeStyle = "#00FF00";
-        dCtx.lineWidth = Math.max(2, canvas.width * 0.003);
-        for (const p of (result.rowHintPairs || [])) {
-          const pn = numbers[p.idxA];
-          const bn = numbers[p.idxB];
-          if (pn && bn) {
-            const x = Math.min(pn.x, bn.x) - 2;
-            const y = pn.y - 2;
-            const w = Math.max(pn.w, bn.w) + 4;
-            const h = (bn.y + bn.h) - pn.y + 4;
-            dCtx.strokeRect(x, y, w, h);
-          }
-        }
-
-        // Draw col hint pairs (blue boxes)
-        dCtx.strokeStyle = "#00AAFF";
-        for (const p of (result.colHintPairs || [])) {
-          const pn = numbers[p.idxA];
-          const bn = numbers[p.idxB];
-          if (pn && bn) {
-            const x = Math.min(pn.x, bn.x) - 2;
-            const y = pn.y - 2;
-            const w = Math.max(pn.w, bn.w) + 4;
-            const h = (bn.y + bn.h) - pn.y + 4;
-            dCtx.strokeRect(x, y, w, h);
-          }
-        }
-      }
-
-      setDebugImg(dCanvas.toDataURL("image/jpeg", 0.5));
-      setProgress(100);
-
-      if (!result) {
-        const msg = `Found ${numbers.length} numbers but couldn't match the hint pattern. Need 5 right + 5 bottom pairs.`;
-        setErrorMsg(msg);
-        setDebugInfo(`Detected numbers: ${numbers.map(n => n.value).join(", ")}`);
-        setStatus("error");
-        return;
-      }
-
-      const { rowResults, colResults } = result;
-
-      const filledCount = [...rowResults, ...colResults].filter(r => r.pts !== "" || r.bombs !== "").length;
-      const rowStr = rowResults.map(r => `${r.pts || "?"}/${r.bombs || "?"}`).join(", ");
-      const colStr = colResults.map(r => `${r.pts || "?"}/${r.bombs || "?"}`).join(", ");
-      setDebugInfo(`R:[${rowStr}] C:[${colStr}] (${numbers.length} nums, ${result.allPairs.length} pairs)`);
+      const rowStr = rowResults.map(r => `${r.pts}/${r.bombs}`).join(", ");
+      const colStr = colResults.map(r => `${r.pts}/${r.bombs}`).join(", ");
+      setDebugInfo(`R:[${rowStr}] C:[${colStr}]`);
 
       setStatus("done");
       onHintsDetected(rowResults, colResults);
     } catch (e) {
-      console.error("Processing error:", e);
-      setErrorMsg(e.message || "Failed to process image");
+      console.error("Scan error:", e);
+      setErrorMsg(e.message || "Failed to scan image");
       setStatus("error");
     }
   };
@@ -316,7 +201,7 @@ export default function PhotoCapture({ onHintsDetected }) {
   };
 
   const reset = () => {
-    setStatus("idle"); setProgress(0); setErrorMsg(""); setDebugInfo(""); setDebugImg(null);
+    setStatus("idle"); setErrorMsg(""); setDebugInfo("");
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (cameraInputRef.current) cameraInputRef.current.value = "";
   };
@@ -340,17 +225,23 @@ export default function PhotoCapture({ onHintsDetected }) {
           <div style={{
             fontFamily: "'Press Start 2P', monospace", fontSize: 7,
             color: "#FFF", marginBottom: 4,
-          }}>SCANNING... {progress}%</div>
+          }}>ANALYZING...</div>
           <div style={{
-            height: 8, background: "#1A5A3A",
-            border: "2px solid #0A3A2A", borderRadius: 4, overflow: "hidden",
+            height: 4, background: "#1A5A3A", borderRadius: 4, overflow: "hidden",
           }}>
             <div style={{
-              height: "100%", width: `${progress}%`,
+              height: "100%", width: "60%",
               background: "linear-gradient(90deg, #D8A838, #E8C848)",
-              transition: "width 0.2s", borderRadius: 2,
+              borderRadius: 2,
+              animation: "shimmerBar 1.5s ease-in-out infinite",
             }} />
           </div>
+          <style>{`
+            @keyframes shimmerBar {
+              0% { transform: translateX(-100%); }
+              100% { transform: translateX(200%); }
+            }
+          `}</style>
         </div>
       )}
 
@@ -359,7 +250,6 @@ export default function PhotoCapture({ onHintsDetected }) {
           <span style={{ fontFamily: "'Press Start 2P', monospace", fontSize: 7, color: "#AAFFAA" }}>✓ VERIFY & SOLVE</span>
           <button onClick={reset} style={retryStyle}>RETRY</button>
           {debugInfo && <div style={{ fontFamily: "monospace", fontSize: 9, color: "#AAFFAA88", marginTop: 4, wordBreak: "break-all" }}>{debugInfo}</div>}
-          {debugImg && <img src={debugImg} alt="debug" style={{ width: "100%", maxWidth: 280, marginTop: 6, borderRadius: 4, border: "1px solid #FFF3" }} />}
         </div>
       )}
 
@@ -367,8 +257,6 @@ export default function PhotoCapture({ onHintsDetected }) {
         <div style={{ textAlign: "center" }}>
           <span style={{ fontFamily: "'Press Start 2P', monospace", fontSize: 6, color: "#FFAAAA" }}>⚠ {errorMsg}</span>
           <button onClick={reset} style={retryStyle}>RETRY</button>
-          {debugInfo && <div style={{ fontFamily: "monospace", fontSize: 9, color: "#FFAAAA88", marginTop: 4, wordBreak: "break-all" }}>{debugInfo}</div>}
-          {debugImg && <img src={debugImg} alt="debug" style={{ width: "100%", maxWidth: 280, marginTop: 6, borderRadius: 4, border: "1px solid #FFF3" }} />}
         </div>
       )}
     </div>
