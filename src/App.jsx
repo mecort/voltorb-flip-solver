@@ -2,129 +2,425 @@ import { useState, useCallback } from "react";
 import PhotoCapture from "./PhotoCapture";
 
 /* ═══════════════════════════════════════════════════════
-   SOLVER ENGINE
+   SOLVER ENGINE — Heuristic + Exhaustive Enumeration
+   
+   Approach:
+   1. Apply heuristic deduction rules to narrow cell possibilities
+   2. Enumerate ALL valid complete boards consistent with hints + known cells
+   3. For each unknown cell, compute probability distribution across all solutions
+   4. Identify safe cells (never a bomb in any solution)
+   5. Recommend the safest non-trivial flip (lowest bomb probability among cells
+      that could be 2 or 3, since those are what you need to find)
 ═══════════════════════════════════════════════════════ */
-function cartesian(arrays) {
-  return arrays.reduce(
-    (acc, arr) => acc.flatMap((a) => arr.map((v) => [...a, v])),
-    [[]]
-  );
-}
-function getValidCombos([targetSum, targetBombs], cellsPossible) {
-  return cartesian(cellsPossible.map((s) => [...s])).filter(
-    (c) =>
-      c.filter((v) => v === 0).length === targetBombs &&
-      c.reduce((a, b) => a + b, 0) === targetSum
-  );
-}
-function deepCopy(p) {
-  return p.map((row) => row.map((s) => new Set(s)));
-}
-function constrain(possible, rh, ch) {
+
+/**
+ * Apply heuristic deduction rules to narrow possibilities.
+ * Each cell has a Set of possible values {0, 1, 2, 3}.
+ * 
+ * Heuristics:
+ * H1: If remaining bombs + remaining points = remaining cells → all must be 1
+ * H2: If remaining bombs = remaining cells → all must be 0
+ * H3: If remaining bombs = 0 → no cell can be 0
+ * H4: If remaining points = 0 and remaining bombs = remaining cells → all are 0
+ * H5: If a cell can only be one value, pin it
+ * H6: Iterative constraint propagation (if pinning changes things, re-run)
+ */
+function applyHeuristics(possible, rh, ch, known) {
   let changed = true;
-  while (changed) {
+  let iterations = 0;
+
+  while (changed && iterations < 20) {
     changed = false;
+    iterations++;
+
+    // Process rows
     for (let r = 0; r < 5; r++) {
-      const valid = getValidCombos(rh[r], possible[r]);
-      if (!valid.length) return false;
+      const [targetPts, targetBombs] = rh[r];
+      let knownPts = 0, knownBombs = 0, unknownIndices = [];
+
       for (let c = 0; c < 5; c++) {
-        const reach = new Set(valid.map((v) => v[c]));
-        const inter = new Set([...reach].filter((v) => possible[r][c].has(v)));
-        if (!inter.size) return false;
-        if (inter.size !== possible[r][c].size) { possible[r][c] = inter; changed = true; }
+        if (known[r][c] !== null) {
+          knownPts += known[r][c];
+          if (known[r][c] === 0) knownBombs++;
+        } else if (possible[r][c].size === 1) {
+          const val = [...possible[r][c]][0];
+          knownPts += val;
+          if (val === 0) knownBombs++;
+        } else {
+          unknownIndices.push(c);
+        }
+      }
+
+      const remainPts = targetPts - knownPts;
+      const remainBombs = targetBombs - knownBombs;
+      const remainCells = unknownIndices.length;
+
+      if (remainCells === 0) continue;
+
+      // H2: All remaining must be bombs
+      if (remainBombs === remainCells && remainPts === 0) {
+        for (const c of unknownIndices) {
+          if (possible[r][c].size !== 1 || ![...possible[r][c]][0] === 0) {
+            possible[r][c] = new Set([0]);
+            changed = true;
+          }
+        }
+        continue;
+      }
+
+      // H3: No bombs remaining — remove 0 from all unknowns
+      if (remainBombs === 0) {
+        for (const c of unknownIndices) {
+          if (possible[r][c].has(0)) {
+            possible[r][c].delete(0);
+            changed = true;
+          }
+        }
+      }
+
+      // H1: remaining bombs + remaining non-bomb points = remaining cells
+      // and remaining non-bomb points = remaining cells - remaining bombs
+      // If each non-bomb cell must contribute exactly 1 point → all non-bombs are 1
+      const nonBombCells = remainCells - remainBombs;
+      if (nonBombCells > 0 && remainPts === nonBombCells) {
+        // All non-bomb unknowns must be 1
+        for (const c of unknownIndices) {
+          const prev = possible[r][c].size;
+          const newSet = new Set();
+          if (possible[r][c].has(0) && remainBombs > 0) newSet.add(0);
+          if (possible[r][c].has(1)) newSet.add(1);
+          if (newSet.size > 0 && newSet.size < prev) {
+            possible[r][c] = newSet;
+            changed = true;
+          }
+        }
+      }
+
+      // If remaining points > remaining non-bomb cells, some must be >1
+      // If remaining points requires all to be max (3), force that
+      if (nonBombCells > 0 && remainPts === nonBombCells * 3) {
+        for (const c of unknownIndices) {
+          if (possible[r][c].has(3) || possible[r][c].has(0)) {
+            const newSet = new Set();
+            if (possible[r][c].has(0) && remainBombs > 0) newSet.add(0);
+            if (possible[r][c].has(3)) newSet.add(3);
+            if (newSet.size > 0 && newSet.size < possible[r][c].size) {
+              possible[r][c] = newSet;
+              changed = true;
+            }
+          }
+        }
+      }
+
+      // Remove values that are too large for remaining points
+      for (const c of unknownIndices) {
+        if (possible[r][c].size > 1) {
+          const prev = possible[r][c].size;
+          for (const v of [...possible[r][c]]) {
+            if (v > remainPts && v !== 0) possible[r][c].delete(v);
+          }
+          if (possible[r][c].size < prev) changed = true;
+        }
       }
     }
+
+    // Process columns (same logic)
     for (let c = 0; c < 5; c++) {
-      const valid = getValidCombos(ch[c], possible.map((row) => row[c]));
-      if (!valid.length) return false;
+      const [targetPts, targetBombs] = ch[c];
+      let knownPts = 0, knownBombs = 0, unknownIndices = [];
+
       for (let r = 0; r < 5; r++) {
-        const reach = new Set(valid.map((v) => v[r]));
-        const inter = new Set([...reach].filter((v) => possible[r][c].has(v)));
-        if (!inter.size) return false;
-        if (inter.size !== possible[r][c].size) { possible[r][c] = inter; changed = true; }
+        if (known[r][c] !== null) {
+          knownPts += known[r][c];
+          if (known[r][c] === 0) knownBombs++;
+        } else if (possible[r][c].size === 1) {
+          const val = [...possible[r][c]][0];
+          knownPts += val;
+          if (val === 0) knownBombs++;
+        } else {
+          unknownIndices.push(r);
+        }
+      }
+
+      const remainPts = targetPts - knownPts;
+      const remainBombs = targetBombs - knownBombs;
+      const remainCells = unknownIndices.length;
+
+      if (remainCells === 0) continue;
+
+      if (remainBombs === remainCells && remainPts === 0) {
+        for (const r of unknownIndices) {
+          if (possible[r][c].size !== 1) { possible[r][c] = new Set([0]); changed = true; }
+        }
+        continue;
+      }
+      if (remainBombs === 0) {
+        for (const r of unknownIndices) {
+          if (possible[r][c].has(0)) { possible[r][c].delete(0); changed = true; }
+        }
+      }
+      const nonBombCells = remainCells - remainBombs;
+      if (nonBombCells > 0 && remainPts === nonBombCells) {
+        for (const r of unknownIndices) {
+          const prev = possible[r][c].size;
+          const newSet = new Set();
+          if (possible[r][c].has(0) && remainBombs > 0) newSet.add(0);
+          if (possible[r][c].has(1)) newSet.add(1);
+          if (newSet.size > 0 && newSet.size < prev) { possible[r][c] = newSet; changed = true; }
+        }
+      }
+      if (nonBombCells > 0 && remainPts === nonBombCells * 3) {
+        for (const r of unknownIndices) {
+          const newSet = new Set();
+          if (possible[r][c].has(0) && remainBombs > 0) newSet.add(0);
+          if (possible[r][c].has(3)) newSet.add(3);
+          if (newSet.size > 0 && newSet.size < possible[r][c].size) { possible[r][c] = newSet; changed = true; }
+        }
+      }
+      for (const r of unknownIndices) {
+        if (possible[r][c].size > 1) {
+          const prev = possible[r][c].size;
+          for (const v of [...possible[r][c]]) {
+            if (v > remainPts && v !== 0) possible[r][c].delete(v);
+          }
+          if (possible[r][c].size < prev) changed = true;
+        }
       }
     }
   }
-  return true;
+
+  return possible;
 }
-function solve(possible, rh, ch) {
-  if (!constrain(possible, rh, ch)) return false;
-  let best = null, bestSz = 5;
-  for (let r = 0; r < 5; r++)
+
+/**
+ * Enumerate all valid complete boards using row-by-row BFS.
+ * Each row must satisfy its sum and bomb count.
+ * Each column must satisfy its sum and bomb count.
+ * Only values from `possible[r][c]` are tried for each cell.
+ * 
+ * Returns array of valid boards (each a 5x5 number array).
+ * Caps at maxSolutions to avoid hanging on underconstrained boards.
+ */
+function enumerateSolutions(possible, rh, ch, known, maxSolutions = 5000) {
+  const solutions = [];
+
+  // Generate valid row assignments for each row
+  function getRowCombos(r) {
+    const [targetSum, targetBombs] = rh[r];
+    const cells = [];
     for (let c = 0; c < 5; c++) {
-      const sz = possible[r][c].size;
-      if (sz === 0) return false;
-      if (sz > 1 && sz < bestSz) { bestSz = sz; best = [r, c]; }
+      if (known[r][c] !== null) {
+        cells.push([known[r][c]]);
+      } else {
+        cells.push([...possible[r][c]]);
+      }
     }
-  if (!best) return true;
-  const [br, bc] = best;
-  for (const val of [...possible[br][bc]].sort()) {
-    const saved = deepCopy(possible);
-    possible[br][bc] = new Set([val]);
-    if (solve(possible, rh, ch)) return true;
-    for (let r = 0; r < 5; r++) for (let c = 0; c < 5; c++) possible[r][c] = saved[r][c];
+
+    // Generate cartesian product filtered by row constraints
+    let combos = [[]];
+    for (let c = 0; c < 5; c++) {
+      const next = [];
+      for (const partial of combos) {
+        for (const val of cells[c]) {
+          next.push([...partial, val]);
+        }
+      }
+      combos = next;
+      // Early prune: too many bombs or sum already too high
+      combos = combos.filter(combo => {
+        const bombs = combo.filter(v => v === 0).length;
+        const sum = combo.reduce((a, b) => a + b, 0);
+        if (bombs > targetBombs) return false;
+        if (sum > targetSum) return false;
+        return true;
+      });
+    }
+
+    // Final filter: exact match
+    return combos.filter(combo => {
+      const bombs = combo.filter(v => v === 0).length;
+      const sum = combo.reduce((a, b) => a + b, 0);
+      return bombs === targetBombs && sum === targetSum;
+    });
   }
-  return false;
+
+  // Get valid combos for each row
+  const rowCombos = [];
+  for (let r = 0; r < 5; r++) {
+    const combos = getRowCombos(r);
+    if (combos.length === 0) return []; // No valid solutions
+    rowCombos.push(combos);
+  }
+
+  // BFS: try all combinations of row assignments that satisfy column constraints
+  function search(r, board) {
+    if (solutions.length >= maxSolutions) return;
+
+    if (r === 5) {
+      // Verify all columns
+      for (let c = 0; c < 5; c++) {
+        const col = board.map(row => row[c]);
+        const sum = col.reduce((a, b) => a + b, 0);
+        const bombs = col.filter(v => v === 0).length;
+        if (sum !== ch[c][0] || bombs !== ch[c][1]) return;
+      }
+      solutions.push(board.map(row => [...row]));
+      return;
+    }
+
+    // Prune: check partial column constraints
+    for (const combo of rowCombos[r]) {
+      // Quick column check: would adding this row make any column impossible?
+      let valid = true;
+      for (let c = 0; c < 5; c++) {
+        const colSoFar = board.slice(0, r).map(row => row[c]);
+        colSoFar.push(combo[c]);
+        const partialSum = colSoFar.reduce((a, b) => a + b, 0);
+        const partialBombs = colSoFar.filter(v => v === 0).length;
+        if (partialSum > ch[c][0] || partialBombs > ch[c][1]) { valid = false; break; }
+        // Check remaining rows can still satisfy column
+        const remainRows = 5 - r - 1;
+        if (partialBombs + remainRows < ch[c][1]) { valid = false; break; } // Not enough rows for remaining bombs
+        const maxRemainPts = remainRows * 3;
+        if (partialSum + maxRemainPts < ch[c][0]) { valid = false; break; } // Can't reach target sum
+      }
+      if (!valid) continue;
+
+      board.push(combo);
+      search(r + 1, board);
+      board.pop();
+
+      if (solutions.length >= maxSolutions) return;
+    }
+  }
+
+  search(0, []);
+  return solutions;
 }
+
+/**
+ * Compute per-cell probability distributions from enumerated solutions.
+ * Returns a 5x5 array of { counts: {0:n, 1:n, 2:n, 3:n}, total: n, bombProb: f, safe: bool }
+ */
+function computeProbabilities(solutions) {
+  const probs = Array.from({ length: 5 }, () =>
+    Array.from({ length: 5 }, () => ({ counts: { 0: 0, 1: 0, 2: 0, 3: 0 }, total: 0 }))
+  );
+
+  for (const board of solutions) {
+    for (let r = 0; r < 5; r++) {
+      for (let c = 0; c < 5; c++) {
+        probs[r][c].counts[board[r][c]]++;
+        probs[r][c].total++;
+      }
+    }
+  }
+
+  // Compute derived fields
+  for (let r = 0; r < 5; r++) {
+    for (let c = 0; c < 5; c++) {
+      const p = probs[r][c];
+      p.bombProb = p.total > 0 ? p.counts[0] / p.total : 0;
+      p.safe = p.counts[0] === 0; // Never a bomb in any solution
+    }
+  }
+
+  return probs;
+}
+
+/**
+ * Main solver: combines heuristics + exhaustive enumeration.
+ * Returns { possible, probs, solutions, safeCells, recommendation }
+ */
 function runSolver(rh, ch, known) {
-  // known is a 5x5 array: null = unknown, 0-3 = revealed value
-  const p = Array.from({ length: 5 }, (_, r) =>
+  // Initialize possibility sets
+  const possible = Array.from({ length: 5 }, (_, r) =>
     Array.from({ length: 5 }, (_, c) =>
       known[r][c] !== null ? new Set([known[r][c]]) : new Set([0, 1, 2, 3])
     )
   );
-  const isUnique = solve(p, rh, ch);
-  if (!isUnique) {
-    const p2 = Array.from({ length: 5 }, (_, r) =>
-      Array.from({ length: 5 }, (_, c) =>
-        known[r][c] !== null ? new Set([known[r][c]]) : new Set([0, 1, 2, 3])
-      )
-    );
-    constrain(p2, rh, ch);
-    return { possible: p2, isUnique: false };
-  }
-  return { possible: p, isUnique: true };
-}
 
-/* ═══════════════════════════════════════════════════════
-   RECOMMENDATION ENGINE
-   
-   For uncertain cells, rank them by:
-   1. Lowest bomb probability (safest to flip)
-   2. Highest expected multiplier value (most rewarding)
-   
-   Score = (1 - bombProb) * expectedValue
-   where expectedValue = avg of non-zero possibilities
-═══════════════════════════════════════════════════════ */
-function getRecommendation(possible) {
-  let bestScore = -1;
-  let bestCell = null;
+  // Step 1: Heuristic deduction
+  applyHeuristics(possible, rh, ch, known);
 
+  // Check for contradictions
   for (let r = 0; r < 5; r++) {
     for (let c = 0; c < 5; c++) {
-      const opts = possible[r][c];
-      if (opts.size <= 1) continue; // Already known
-
-      const values = [...opts];
-      const bombProb = values.includes(0) ? 1 / values.length : 0;
-      const nonZero = values.filter(v => v > 0);
-      const expectedValue = nonZero.length > 0
-        ? nonZero.reduce((a, b) => a + b, 0) / nonZero.length
-        : 0;
-      
-      // Score: prefer low bomb risk and high value
-      // Weight safety heavily (multiply by safety squared for emphasis)
-      const safety = 1 - bombProb;
-      const score = safety * safety * expectedValue;
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestCell = [r, c];
+      if (possible[r][c].size === 0) {
+        return { possible, probs: null, solutions: [], error: "No valid solution — check your hints" };
       }
     }
   }
 
-  return bestCell;
+  // Step 2: Enumerate all valid solutions
+  const solutions = enumerateSolutions(possible, rh, ch, known);
+
+  if (solutions.length === 0) {
+    return { possible, probs: null, solutions: [], error: "No valid solution — check your hints" };
+  }
+
+  // Step 3: Compute probabilities
+  const probs = computeProbabilities(solutions);
+
+  // Step 4: Update possible sets from actual solutions (may be tighter than heuristics)
+  for (let r = 0; r < 5; r++) {
+    for (let c = 0; c < 5; c++) {
+      if (known[r][c] !== null) continue;
+      const actualPossible = new Set();
+      for (const [val, count] of Object.entries(probs[r][c].counts)) {
+        if (count > 0) actualPossible.add(Number(val));
+      }
+      possible[r][c] = actualPossible;
+    }
+  }
+
+  // Step 5: Find safe cells (never a bomb) and recommendation
+  const safeCells = [];
+  for (let r = 0; r < 5; r++) {
+    for (let c = 0; c < 5; c++) {
+      if (known[r][c] !== null) continue;
+      if (possible[r][c].size === 1) continue; // Already determined
+      if (probs[r][c].safe) safeCells.push([r, c]);
+    }
+  }
+
+  // Recommendation: among uncertain cells that could be 2 or 3,
+  // find the one with lowest bomb probability.
+  // If no 2/3 cells are uncertain, recommend safest overall.
+  let recommendation = null;
+  let bestScore = -1;
+
+  for (let r = 0; r < 5; r++) {
+    for (let c = 0; c < 5; c++) {
+      if (known[r][c] !== null) continue;
+      if (possible[r][c].size <= 1) continue;
+
+      const p = probs[r][c];
+      const couldBeHigh = p.counts[2] > 0 || p.counts[3] > 0;
+      const safety = 1 - p.bombProb;
+
+      // Priority: safe cells that could be 2/3 > safe cells > risky cells with high value
+      let score;
+      if (p.safe && couldBeHigh) {
+        score = 1000 + (p.counts[2] + p.counts[3]) / p.total; // Best: safe + high value
+      } else if (p.safe) {
+        score = 500; // Safe but only 1s
+      } else if (couldBeHigh) {
+        score = safety * 100 + (p.counts[2] + p.counts[3]) / p.total; // Risky but rewarding
+      } else {
+        score = safety * 10; // Only 0s and 1s possible, low priority
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        recommendation = [r, c];
+      }
+    }
+  }
+
+  const isUnique = solutions.length === 1;
+
+  return { possible, probs, solutions, safeCells, recommendation, isUnique, error: null };
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -170,7 +466,7 @@ const CSTYLE = {
   "?": { bg: "#2A7A5A", border: "#1A5A3A", text: "#4ABA8A" },
 };
 
-function GridCell({ opts, revealed, delay, isRecommended, isKnown, knownValue, onFlip }) {
+function GridCell({ opts, revealed, delay, isRecommended, isSafe, isKnown, knownValue, onFlip }) {
   const solved = opts?.size === 1;
   const val = solved ? [...opts][0] : null;
 
@@ -219,16 +515,17 @@ function GridCell({ opts, revealed, delay, isRecommended, isKnown, knownValue, o
     );
   }
 
-  // Uncertain cell — clickable if recommended or any uncertain cell
+  // Uncertain cell — clickable
   const cs = CSTYLE["?"];
+  const highlight = isRecommended ? "#FFD700" : isSafe ? "#00FF88" : null;
   return (
     <div className="grid-cell" onClick={onFlip} style={{
-      background: isRecommended ? "#1A6A4A" : cs.bg,
-      border: `2px solid ${isRecommended ? "#FFD700" : cs.border}`,
+      background: highlight ? (isRecommended ? "#1A6A4A" : "#1A5A4A") : cs.bg,
+      border: `2px solid ${highlight || cs.border}`,
       borderRadius: 3, position: "relative",
       display: "flex", alignItems: "center", justifyContent: "center",
-      boxShadow: isRecommended
-        ? "0 0 8px #FFD70088, inset 0 0 4px #FFD70044"
+      boxShadow: highlight
+        ? `0 0 8px ${highlight}88, inset 0 0 4px ${highlight}44`
         : "inset 0 1px 2px rgba(0,0,0,0.1)",
       cursor: "pointer",
       opacity: revealed ? 1 : 0,
@@ -238,7 +535,7 @@ function GridCell({ opts, revealed, delay, isRecommended, isKnown, knownValue, o
     }}>
       <span style={{
         fontFamily: "'Press Start 2P', monospace", fontSize: 11,
-        color: isRecommended ? "#FFD700" : cs.text,
+        color: highlight || cs.text,
       }}>?</span>
       {opts && (
         <div style={{
@@ -259,6 +556,13 @@ function GridCell({ opts, revealed, delay, isRecommended, isKnown, knownValue, o
           fontFamily: "'Press Start 2P', monospace", fontSize: 6,
           color: "#FFD700", textShadow: "0 0 4px #FFD70088",
         }}>★</div>
+      )}
+      {isSafe && !isRecommended && (
+        <div style={{
+          position: "absolute", top: -2, left: -2,
+          fontFamily: "'Press Start 2P', monospace", fontSize: 6,
+          color: "#00FF88", textShadow: "0 0 4px #00FF8888",
+        }}>✓</div>
       )}
     </div>
   );
@@ -604,8 +908,7 @@ export default function VoltorbGBA() {
         return [p, b];
       });
       const res = runSolver(rh, ch, currentKnown);
-      if (res.possible.some((row) => row.some((s) => s.size === 0)))
-        throw new Error("No valid solution — check hints");
+      if (res.error) throw new Error(res.error);
       setResult(res);
       setTimeout(() => setRevealed(true), 60);
     } catch (e) { setError(e.message); }
@@ -634,12 +937,14 @@ export default function VoltorbGBA() {
     doSolve(newKnown);
   };
 
-  // Calculate recommendation
-  const recommendation = result && !result.isUnique ? getRecommendation(result.possible) : null;
+  // Recommendation comes from the solver now
+  const recommendation = result?.recommendation || null;
 
   const flipCount = result ? result.possible.flat().filter((s) => s.size === 1 && ([...s][0] === 2 || [...s][0] === 3)).length : 0;
   const bombCount = result ? result.possible.flat().filter((s) => s.size === 1 && [...s][0] === 0).length : 0;
   const unsureCount = result ? result.possible.flat().filter((s) => s.size > 1).length : 0;
+  const safeCount = result?.safeCells?.length || 0;
+  const solutionCount = result?.solutions?.length || 0;
   const knownCount = known.flat().filter(v => v !== null).length;
 
   return (
@@ -711,6 +1016,7 @@ export default function VoltorbGBA() {
             {Array.from({ length: N }, (_, c) => {
               const isKnownCell = known[r][c] !== null;
               const isRec = recommendation && recommendation[0] === r && recommendation[1] === c;
+              const isSafe = result?.safeCells?.some(([sr, sc]) => sr === r && sc === c);
 
               if (!result) return <CardCell key={c} />;
 
@@ -721,10 +1027,10 @@ export default function VoltorbGBA() {
                   revealed={revealed}
                   delay={(r * N + c) * 28}
                   isRecommended={isRec}
+                  isSafe={isSafe && !isRec}
                   isKnown={isKnownCell}
                   knownValue={known[r][c]}
                   onFlip={() => {
-                    // Only allow flipping uncertain cells
                     if (!isKnownCell && result.possible[r][c].size > 1) {
                       setFlipPicker({ r, c });
                     }
@@ -770,8 +1076,9 @@ export default function VoltorbGBA() {
               <span style={{
                 fontFamily: "'Press Start 2P',monospace", fontSize: 8,
                 color: result.isUnique ? "#208848" : "#B88020",
-              }}>{result.isUnique ? "✓ SOLVED" : "~ PARTIAL"}</span>
+              }}>{result.isUnique ? "✓ SOLVED" : `${solutionCount} SOLUTIONS`}</span>
               <div style={{ display: "flex", gap: 6 }}>
+                {safeCount > 0 && <span style={{ fontFamily: "'Press Start 2P',monospace", fontSize: 7, color: "#208848" }}>✓{safeCount}safe</span>}
                 <span style={{ fontFamily: "'Press Start 2P',monospace", fontSize: 7, color: "#208848" }}>★{flipCount}</span>
                 <span style={{ fontFamily: "'Press Start 2P',monospace", fontSize: 7, color: "#CC2233" }}>✗{bombCount}</span>
                 <span style={{ fontFamily: "'Press Start 2P',monospace", fontSize: 7, color: "#3868B8" }}>?{unsureCount}</span>
@@ -785,15 +1092,21 @@ export default function VoltorbGBA() {
         </div>
 
         {/* ═══ RECOMMENDATION HINT ═══ */}
-        {result && !result.isUnique && recommendation && (
+        {result && !result.isUnique && (recommendation || safeCount > 0) && (
           <div style={{
             marginTop: 6, padding: "6px 10px",
             background: "#1A5A3A", borderRadius: 4,
             border: "1px solid #FFD70044",
           }}>
-            <span style={{
-              fontFamily: "'Press Start 2P',monospace", fontSize: 7, color: "#FFD700",
-            }}>★ TAP GOLD CELL TO FLIP</span>
+            {safeCount > 0 ? (
+              <span style={{
+                fontFamily: "'Press Start 2P',monospace", fontSize: 7, color: "#00FF88",
+              }}>✓ {safeCount} SAFE CELL{safeCount > 1 ? "S" : ""} — TAP TO FLIP</span>
+            ) : recommendation ? (
+              <span style={{
+                fontFamily: "'Press Start 2P',monospace", fontSize: 7, color: "#FFD700",
+              }}>★ BEST GUESS: {result.probs ? `${Math.round((1 - result.probs[recommendation[0]][recommendation[1]].bombProb) * 100)}% safe` : "TAP GOLD CELL"}</span>
+            ) : null}
             {knownCount > 0 && (
               <span style={{
                 fontFamily: "'Press Start 2P',monospace", fontSize: 6, color: "#A0E8C0",
