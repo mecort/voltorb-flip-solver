@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html><body style="padding:20px;font-family:sans-serif">
+<h2>PWA Icon Generator</h2>
+<p>Right-click each image and "Save Image As" to the <code>public/</code> folder:</p>
+<canvas id="c192" width="192" height="192" style="border:1px solid #ccc;margin:10px"></canvas>
+<canvas id="c512" width="512" height="512" style="border:1px solid #ccc;margin:10px"></canvas>
+<script>
+function draw(canvas, size) {
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#2A6A4A';
+  ctx.beginPath();
+  ctx.roundRect(0, 0, size, size, size * 0.12);
+  ctx.fill();
+  const cx = size/2, cy = size/2, r = size*0.31;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2);
+  ctx.fillStyle = '#DD4455'; ctx.fill();
+  ctx.strokeStyle = '#AA2233'; ctx.lineWidth = size*0.02; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx-r, cy); ctx.lineTo(cx+r, cy);
+  ctx.strokeStyle = '#FF9999'; ctx.lineWidth = size*0.025; ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, r*0.32, 0, Math.PI*2);
+  ctx.fillStyle = 'white'; ctx.fill();
+  ctx.beginPath(); ctx.arc(cx, cy, r*0.16, 0, Math.PI*2);
+  ctx.fillStyle = '#CC2233'; ctx.fill();
+  ctx.beginPath(); ctx.ellipse(cx - r*0.35, cy - r*0.45, r*0.22, r*0.16, 0, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.fill();
+}
+draw(document.getElementById('c192'), 192);
+draw(document.getElementById('c512'), 512);
+</script>
+<p><strong>Save as:</strong> <code>public/pwa-192x192.png</code> and <code>public/pwa-512x512.png</code></p>
+</body></html>
