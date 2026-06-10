@@ -109,6 +109,7 @@ export default function PasteInput({ onHintsDetected }) {
       marginTop: 8, padding: "10px",
       background: "#1A5A3A", borderRadius: 4,
       border: "2px solid #A0E8C066",
+      width: "100%",
     }}>
       {/* Instructions */}
       <div style={{

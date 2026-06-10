@@ -215,14 +215,14 @@ export default function PhotoCapture({ onHintsDetected }) {
   };
 
   return (
-    <div style={{ marginTop: 10 }}>
+    <div>
       <input ref={fileInputRef} type="file" accept="image/*"
         onChange={handleFileChange} style={{ display: "none" }} />
       <input ref={cameraInputRef} type="file" accept="image/*" capture="environment"
         onChange={handleFileChange} style={{ display: "none" }} />
 
       {status === "idle" && (
-        <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+        <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => cameraInputRef.current?.click()} style={btnStyle}>📷 SNAP</button>
           <button onClick={() => fileInputRef.current?.click()} style={btnStyle}>📁 UPLOAD</button>
         </div>

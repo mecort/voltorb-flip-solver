@@ -786,7 +786,7 @@ export default function VoltorbGBA() {
         </div>
 
         {/* ═══ PHOTO / PASTE INPUT ═══ */}
-        <div style={{ display: "flex", gap: 8, marginTop: 10, justifyContent: "center", flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, justifyContent: "center", flexWrap: "wrap" }}>
           <PhotoCapture onHintsDetected={handlePhotoHints} />
           <PasteInput onHintsDetected={handlePhotoHints} />
         </div>
