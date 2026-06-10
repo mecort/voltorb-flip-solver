@@ -30,3 +30,5 @@ pnpm-debug.log*
 
 # Tesseract trained data (downloaded at runtime)
 *.traineddata
+
+.vercel
