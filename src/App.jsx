@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
 import PhotoCapture from "./PhotoCapture";
+import PasteInput from "./PasteInput";
 import { runSolver } from "./solver";
 
 /* ═══════════════════════════════════════════════════════
@@ -784,8 +785,11 @@ export default function VoltorbGBA() {
           <GameBtn label="CLEAR" variant="danger" onClick={clearAll} />
         </div>
 
-        {/* ═══ PHOTO CAPTURE ═══ */}
-        <PhotoCapture onHintsDetected={handlePhotoHints} />
+        {/* ═══ PHOTO / PASTE INPUT ═══ */}
+        <div style={{ display: "flex", gap: 8, marginTop: 10, justifyContent: "center", flexWrap: "wrap" }}>
+          <PhotoCapture onHintsDetected={handlePhotoHints} />
+          <PasteInput onHintsDetected={handlePhotoHints} />
+        </div>
 
       </div>
     </div>
