@@ -103,6 +103,20 @@ export default async function handler(req, res) {
     if (!geminiResponse.ok) {
       const errText = await geminiResponse.text();
       console.error("Gemini API error:", errText);
+
+      if (geminiResponse.status === 429) {
+        return res.status(429).json({
+          error: "Rate limit reached. Please wait a minute and try again, or use Quick Entry mode.",
+          retryable: true,
+        });
+      }
+      if (geminiResponse.status === 403) {
+        return res.status(403).json({
+          error: "API quota exhausted or key invalid. Use Quick Entry mode instead.",
+          retryable: false,
+        });
+      }
+
       return res.status(502).json({ error: "Vision API request failed", details: errText });
     }
 

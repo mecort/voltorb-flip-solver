@@ -39,6 +39,14 @@ async function scanImage(base64Image) {
 
   if (!response.ok) {
     const err = await response.json().catch(() => ({ error: "Request failed" }));
+
+    if (response.status === 429) {
+      throw new Error("Rate limit reached — wait a minute or use Quick Entry");
+    }
+    if (response.status === 403) {
+      throw new Error("API quota exhausted — use Quick Entry mode instead");
+    }
+
     throw new Error(err.error || `API returned ${response.status}`);
   }
 
